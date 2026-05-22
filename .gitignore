@@ -1,0 +1,23 @@
+# CMake build directories
+cmake-build-*/
+build/
+out/
+
+# CMake cache and files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+.idea/
+
+# C++ build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+
+# Dy altny
+**/altnu/*
+**/altu/*
