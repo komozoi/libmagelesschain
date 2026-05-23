@@ -17,3 +17,34 @@
  */
 
 #include "Transaction.h"
+
+#include "ds/HashMap.h"
+
+#include <mutex>
+
+
+static HashMap<uint32_t, Transaction::FactoryFunc>& getFactories() {
+	static HashMap<uint32_t, Transaction::FactoryFunc> factories(16);
+	return factories;
+}
+
+static std::mutex& getFactoriesMutex() {
+	static std::mutex mutex;
+	return mutex;
+}
+
+void Transaction::registerType(const uint8_t typeId, const FactoryFunc factory) {
+	std::lock_guard _(getFactoriesMutex());
+	getFactories().put(typeId, factory);
+}
+
+sp<Transaction> Transaction::read(MmapHandle* src) {
+	uint8_t typeId;
+	if (src->read(typeId) != sizeof(uint8_t))
+		throw std::out_of_range("Failed to read transaction type");
+
+	std::lock_guard _(getFactoriesMutex());
+	const FactoryFunc* factory = getFactories().getPtr(typeId);
+	if (!factory) return nullptr;
+	return (*factory)(src);
+}

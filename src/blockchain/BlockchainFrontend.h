@@ -19,7 +19,10 @@
 #ifndef LIBMAGELESSCHAIN_BLOCKCHAINFRONTEND_H
 #define LIBMAGELESSCHAIN_BLOCKCHAINFRONTEND_H
 
+#include <thread>
+#include <atomic>
 #include "BlockchainBackend.h"
+#include "BlockchainConfig.h"
 
 
 /*
@@ -31,7 +34,8 @@
  */
 class BlockchainFrontend {
 public:
-	BlockchainFrontend(BlockchainBackend& backend);
+	BlockchainFrontend(BlockchainBackend& backend, sp<BlockchainStateSnapshot> initialState, BlockchainConfig config = {});
+	~BlockchainFrontend();
 
 	// Only one global instance of this should really exist
 	// Perspectives could be created for specific purposes, but those
@@ -42,11 +46,27 @@ public:
 	int getBlockHeight() const { return backend.getBlockHeight(); }
 	int getMempoolSize() const { return mempool.size(); }
 
-	void sendTransaction(const sp<Transaction>& transaction) { mempool.add(transaction); }
+	void sendTransaction(const sp<Transaction>& transaction);
+
+	sp<Transaction> getTransactionById(uint64_t id) const;
+	ArrayList<sp<Transaction>> getTransactionsByTimeWindow(uint64_t startMillis, uint64_t endMillis);
+
+	sp<BlockchainStateSnapshot> getState() const { return state; }
 
 private:
+	void reapplyHistory();
+	void blockBuilderLoop();
+	void saveMempool();
+	void loadMempool();
+
 	BlockchainBackend& backend;
+	BlockchainConfig config;
+	sp<BlockchainStateSnapshot> state;
 	ArrayList<sp<Transaction>> mempool;
+	std::mutex mempoolMutex;
+
+	std::thread builderThread;
+	std::atomic<bool> running;
 };
 
 

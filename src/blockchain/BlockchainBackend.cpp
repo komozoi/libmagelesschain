@@ -23,6 +23,9 @@
 #include "universaltime.h"
 #include "alloc/pointer.h"
 
+#include <sys/mman.h>
+#include <sys/stat.h>
+
 #define FILE_VERSION_00_00_00 0xC7000000
 #define CURRENT_FILE_VERSION FILE_VERSION_00_00_00
 
@@ -44,7 +47,7 @@
 
 struct blockchain_metadata_header_t {
 	uint32_t version;
-	uint64_t lastBlockTime;
+	uint64_t lastBlockTimestamp;
 	long currentBlockHeight;
 };
 
@@ -57,15 +60,11 @@ struct blockchain_epoch_header_t {
 	uint32_t blockOffset[BLOCKS_PER_EPOCH];
 };
 
-struct block_header_t {
-	uint64_t millis;
-	uint16_t numTransactions;
-	uint8_t reserved[54];
-};
 
-
-BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir)
-	: dataDir(dataDir), openEpochs(32), log(logger, "BlockchainBackend") {
+BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir, BlockchainConfig config)
+	: config(config), dataDir(dataDir), openEpochs(32), log(logger, "BlockchainBackend") {
+	mkdir(dataDir.c_str(), 0770);
+	mkdir((dataDir + "/epochs").c_str(), 0770);
 	FdHandle metadataHandle = FdHandle::open((dataDir + "/metadata.bin").c_str(), O_RDWR | O_CREAT, 0660);
 	metadataFile = metadataHandle.getMmapHandle(0, sizeof(blockchain_metadata_header_t));
 	header = metadataFile.directPointer<blockchain_metadata_header_t>();
@@ -76,23 +75,23 @@ BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir)
 
 long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions) {
 	uint64_t millis = millis_since_epoch();
-	uint64_t duration = millis - header->lastBlockTime;
+	uint64_t duration = millis - header->lastBlockTimestamp;
 
 	// Skip timing checks if we already have the maximum per block - maximize throughput in this case
 	if (transactions.size() != MAX_TX_PER_BLOCK) {
 		// Basic checks: Has enough time elapsed since the last block?
-		// Average block time should be 60 seconds.  Most systems will have ~180-240 transactions per minute.
+		// At defaults: Average block time should be 60 seconds.  Most systems will have ~180-240 transactions per minute.
 		// Transaction rate varies, so block time should go down if there are too many transactions.
-		// Thus, if the transaction queue has 180 transactions, the throughput will be 180 transactions per minute.
+		// Thus, if the transaction queue has config.targetThroughput transactions, the throughput will be that many transactions per minute.
 		//  Throughput = numTransactions / blockTime
-		//  ThroughputWanted = numTransactions^2 / 180
+		//  ThroughputWanted = numTransactions^2 / config.targetThroughput
 		// Thus:
-		//  blockTime = 60 * 180 / numTransactions
-		// Block time should stay in the range of 5s to 600s.
-		uint64_t blockTime = std::max(std::min(60 * 180 * 1000 / transactions.size(), 600 * 1000), 5 * 1000);
+		//  blockTime = targetBlockTime * targetThroughput / numTransactions
+		// Block time should stay in the range of 100ms to 600s.
+		uint64_t blockTime = std::max(std::min((uint64_t)config.targetBlockTimeMs * config.targetThroughput / (uint32_t)transactions.size(), (uint64_t)600 * 1000), (uint64_t)100);
 		if (duration < blockTime || (duration > LONG_TIME_MILLIS && transactions.size() > WANTED_TX_PER_BLOCK/2) || transactions.size() > MAX_TX_PER_BLOCK)
 			// Not time to mine yet
-				return -1;
+			return -1;
 	}
 
 	// First, verify the transactions with a transient state
@@ -104,19 +103,85 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 	blockchain_epoch_header_t* epochFileHeader = epochFile->directPointer<blockchain_epoch_header_t>(0);
 
 	// Actually write the block to disk
-	uint64_t blockOffset = epochFileHeader->blockOffset[blockNumber % BLOCKS_PER_EPOCH];
+	uint32_t offsetIdx = (uint32_t)(blockNumber % BLOCKS_PER_EPOCH);
+	uint64_t blockOffset = epochFileHeader->blockOffset[offsetIdx];
+	if (blockOffset == 0) {
+		blockOffset = (sizeof(blockchain_epoch_header_t) + BLOCK_ALIGNMENT - 1) & ~(BLOCK_ALIGNMENT - 1);
+		epochFileHeader->blockOffset[offsetIdx] = blockOffset;
+	}
 	block_header_t* blockHeader = epochFile->directPointer<block_header_t>(blockOffset);
 	*blockHeader = {millis, (uint16_t)transactions.size(), {}};
+	header->lastBlockTimestamp = millis;
 	epochFile->seek(blockOffset + sizeof(block_header_t));
 	for (const sp<Transaction>& transaction: transactions)
 		transaction->write(epochFile);
 
+	// Update offset for next block
+	if ((blockNumber + 1) % BLOCKS_PER_EPOCH != 0) {
+		uint64_t nextOffset = epochFile->seek(0, SEEK_CUR);
+		epochFileHeader->blockOffset[(blockNumber + 1) % BLOCKS_PER_EPOCH] = (nextOffset + BLOCK_ALIGNMENT - 1) & ~(BLOCK_ALIGNMENT - 1);
+	}
+
 	// Next write to the index
 	// TODO: Write to index
 
-	log.debug("New block mined with %u transactions at %u transactions per minute.", transactions.size(), transactions.size() * 1000 / duration);
+	log.debug("New block mined with %u transactions at %u transactions per minute.", transactions.size(), (uint32_t)(transactions.size() * 60000 / duration));
+
+	msync(header, sizeof(blockchain_metadata_header_t), MS_SYNC);
+
+	lastBlockTime = duration;
 
 	return (long)blockNumber;
+}
+
+
+ArrayList<sp<Transaction>> BlockchainBackend::getBlock(uint64_t blockNumber) {
+	ArrayList<sp<Transaction>> results;
+	if (blockNumber > (uint64_t)header->currentBlockHeight || blockNumber == 0)
+		throw std::range_error("Block number out of range");
+
+	MmapHandle* epochFile = getEpochFile(blockNumber);
+	if (!epochFile)
+		throw std::runtime_error("Failed to open epoch file");
+
+	uint32_t blockOffset = getBlockOffset(blockNumber);
+	if (blockOffset == 0)
+		throw std::runtime_error("Failed to get block offset or offset is zero");
+
+	block_header_t* blockHeader = epochFile->directPointer<block_header_t>(blockOffset);
+	epochFile->seek(blockOffset + sizeof(block_header_t));
+	for (int i = 0; i < blockHeader->numTransactions; ++i) {
+		sp<Transaction> tx = Transaction::read(epochFile);
+		if (!tx)
+			throw std::runtime_error("Failed to deserialize transaction");
+		results.add(tx);
+	}
+
+	return results;
+}
+
+ArrayList<sp<Transaction>> BlockchainBackend::getTransactionsByTimeWindow(uint64_t startMillis, uint64_t endMillis) {
+	if (startMillis > endMillis)
+		throw std::invalid_argument("Start time must be before end time");
+
+	ArrayList<sp<Transaction>> results;
+	long height = getBlockHeight();
+	for (long h = 0; h <= height; ++h) {
+		MmapHandle* epochFile = getEpochFile(h);
+		uint32_t blockOffset = getBlockOffset(h);
+		if (blockOffset == 0) continue;
+
+		block_header_t* blockHeader = epochFile->directPointer<block_header_t>(blockOffset);
+		if (blockHeader->millis >= startMillis && blockHeader->millis <= endMillis) {
+			epochFile->seek(blockOffset + sizeof(block_header_t));
+			for (int i = 0; i < blockHeader->numTransactions; ++i) {
+				if (sp<Transaction> tx = Transaction::read(epochFile))
+					results.add(tx);
+			}
+		}
+		if (blockHeader->millis > endMillis) break;
+	}
+	return results;
 }
 
 
@@ -125,7 +190,18 @@ long BlockchainBackend::getBlockHeight() const {
 }
 
 uint64_t BlockchainBackend::getLastBlockTimestamp() const {
-	return header->lastBlockTime;
+	return header->lastBlockTimestamp;
+}
+
+uint64_t BlockchainBackend::getLastBlockTime() const {
+	return lastBlockTime;
+}
+
+uint32_t BlockchainBackend::getBlockOffset(uint64_t blockNumber) {
+	MmapHandle* epochFile = getEpochFile(blockNumber);
+	if (!epochFile) return 0;
+	blockchain_epoch_header_t* epochHeader = epochFile->directPointer<blockchain_epoch_header_t>(0);
+	return epochHeader->blockOffset[blockNumber % BLOCKS_PER_EPOCH];
 }
 
 MmapHandle* BlockchainBackend::getEpochFile(uint64_t blockNumber) {
@@ -133,14 +209,14 @@ MmapHandle* BlockchainBackend::getEpochFile(uint64_t blockNumber) {
 	if (!openEpochs.hasKey(epochNumber)) {
 		while (openEpochs.size() >= MAX_OPEN_EPOCH_FILES) {
 			// Remove a random epoch file from open set
-			int index = rand() % MAX_OPEN_EPOCH_FILES;
+			int index = rand() % (int)openEpochs.getCapacity();
 			if (openEpochs.presentAtIndex(index)) {
 				delete openEpochs.remove(openEpochs.keyAtIndex(index));
 				break;
 			}
 		}
 
-		FdHandle epochFile = FdHandle::open((dataDir + "/epochs/" + std::to_string(epochNumber) + ".bin").c_str(), O_RDWR | O_CREAT);
+		FdHandle epochFile = FdHandle::open((dataDir + "/epochs/" + std::to_string(epochNumber) + ".bin").c_str(), O_RDWR | O_CREAT, 0660);
 		MmapHandle* epochMmap = new MmapHandle(epochFile.getMmapHandle(0, epochFile.seek(1024 * 1024, SEEK_END)));
 		if (epochFile.isNew()) {
 			// Initialize the file
@@ -158,4 +234,12 @@ MmapHandle* BlockchainBackend::getEpochFile(uint64_t blockNumber) {
 	}
 
 	return openEpochs.get(epochNumber);
+}
+
+BlockchainBackend::~BlockchainBackend() {
+	for (int i = 0; i < openEpochs.getCapacity(); ++i)
+		if (openEpochs.presentAtIndex(i))
+			delete openEpochs.valueAtIndex(i);
+
+	openEpochs.clear();
 }

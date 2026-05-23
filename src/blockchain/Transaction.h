@@ -19,6 +19,9 @@
 #ifndef LIBMAGELESSCHAIN_TRANSACTION_H
 #define LIBMAGELESSCHAIN_TRANSACTION_H
 
+#include "alloc/pointer.h"
+#include "fs/FdHandle.h"
+
 
 class BlockchainStateSnapshot;
 
@@ -28,9 +31,16 @@ public:
 	virtual bool write(BlockchainStateSnapshot& snapshot) const = 0;
 	virtual float computeValue(BlockchainStateSnapshot& snapshot) const = 0;
 
-	virtual void write(void* dst) const = 0;
+	virtual void write(MmapHandle* dst) const = 0;
+	virtual size_t size() const = 0;
+	virtual uint8_t getTypeId() const = 0;
+	virtual uint64_t getTimestamp() const = 0;
 
 	virtual ~Transaction() = default;
+
+	typedef sp<Transaction> (*FactoryFunc)(MmapHandle*);
+	static void registerType(uint8_t typeId, FactoryFunc factory);
+	static sp<Transaction> read(MmapHandle* src);
 };
 
 

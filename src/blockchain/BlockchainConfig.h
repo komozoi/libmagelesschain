@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2021-2026 komozoi
  * Original Creation Date: 2026-5-22
@@ -17,22 +16,14 @@
  *
  */
 
-#ifndef LIBMAGELESSCHAIN_BLOCKCHAINSTATESNAPSHOT_H
-#define LIBMAGELESSCHAIN_BLOCKCHAINSTATESNAPSHOT_H
+#ifndef LIBMAGELESSCHAIN_BLOCKCHAINCONFIG_H
+#define LIBMAGELESSCHAIN_BLOCKCHAINCONFIG_H
 
+#include <cstdint>
 
-class BlockchainBackend;
-
-class BlockchainStateSnapshot {
-public:
-	BlockchainStateSnapshot(BlockchainBackend& backend, long blockNumber);
-
-	virtual ~BlockchainStateSnapshot() = default;
-
-private:
-	BlockchainBackend& backend;
-	long blockNumber;
+struct BlockchainConfig {
+	uint32_t targetBlockTimeMs = 60000;
+	uint32_t targetThroughput = 180;
 };
 
-
-#endif //LIBMAGELESSCHAIN_BLOCKCHAINSTATESNAPSHOT_H
+#endif //LIBMAGELESSCHAIN_BLOCKCHAINCONFIG_H
