@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - '**/*.cpp'
+      - '**/*.c'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - '**/*.cpp'
+      - '**/*.c'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential libgtest-dev
+
+    - name: Configure CMake
+      run: cmake -B cmake-build-debug -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build cmake-build-debug --config Release --target tests
+
+    - name: Test
+      run: ./cmake-build-debug/tests

@@ -1,0 +1,34 @@
+name: Bug Report
+description: File a bug report.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+assignees:
+  - komozoi
+type: bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Bug Description
+      description: What happened, and what did you expect to happen?
+      placeholder: When doing X, Y happened, but Z was expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: How can we make this bug occur?
+      placeholder: Step 1. Call `function()` with argument `value`...
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: If there is any terminal output or logs associated with this, paste it here.
+      render: shell
