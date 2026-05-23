@@ -39,17 +39,17 @@ BlockchainFrontend::~BlockchainFrontend() {
 
 void BlockchainFrontend::sendTransaction(const sp<Transaction>& transaction) {
 	std::lock_guard _(mempoolMutex);
-	if (state) transaction->write(state.mut());
+	if (state) transaction->apply(state.mut());
 	mempool.add(transaction);
 }
 
 void BlockchainFrontend::reapplyHistory() {
 	if (!state) return;
 	long height = backend.getBlockHeight();
-	for (long h = 1; h <= height; ++h) {
+	for (long h = 0; h < height; ++h) {
 		ArrayList<sp<Transaction>> transactions = backend.getBlock(h);
 		for (const sp<Transaction>& tx : transactions) {
-			tx->write(state.mut());
+			tx->apply(state.mut());
 		}
 	}
 }
@@ -133,7 +133,7 @@ void BlockchainFrontend::loadMempool() {
 	for (uint32_t i = 0; i < count; ++i) {
 		sp<Transaction> tx = Transaction::read(&mmap);
 		if (tx) {
-			if (state) tx->write(state.mut());
+			if (state) tx->apply(state.mut());
 			mempool.add(tx);
 		}
 	}

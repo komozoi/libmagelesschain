@@ -98,7 +98,7 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 	// TODO: Implement that
 
 	// Get general epoch file setup/info
-	uint64_t blockNumber = ++header->currentBlockHeight;
+	uint64_t blockNumber = header->currentBlockHeight++;
 	MmapHandle* epochFile = getEpochFile(blockNumber);
 	blockchain_epoch_header_t* epochFileHeader = epochFile->directPointer<blockchain_epoch_header_t>(0);
 
@@ -137,7 +137,7 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 
 ArrayList<sp<Transaction>> BlockchainBackend::getBlock(uint64_t blockNumber) {
 	ArrayList<sp<Transaction>> results;
-	if (blockNumber > (uint64_t)header->currentBlockHeight || blockNumber == 0)
+	if (blockNumber >= (uint64_t)header->currentBlockHeight)
 		throw std::range_error("Block number out of range");
 
 	MmapHandle* epochFile = getEpochFile(blockNumber);
@@ -166,7 +166,7 @@ ArrayList<sp<Transaction>> BlockchainBackend::getTransactionsByTimeWindow(uint64
 
 	ArrayList<sp<Transaction>> results;
 	long height = getBlockHeight();
-	for (long h = 0; h <= height; ++h) {
+	for (long h = 0; h < height; ++h) {
 		MmapHandle* epochFile = getEpochFile(h);
 		uint32_t blockOffset = getBlockOffset(h);
 		if (blockOffset == 0) continue;
@@ -226,7 +226,7 @@ MmapHandle* BlockchainBackend::getEpochFile(uint64_t blockNumber) {
 			epochHeader->epoch = epochNumber;
 			epochHeader->numBlocks = 0;
 			epochHeader->blockAlignment = BLOCK_ALIGNMENT;
-			epochHeader->blockOffset[0] = (sizeof(blockchain_epoch_header_t) + BLOCK_ALIGNMENT) & ~BLOCK_ALIGNMENT;
+			epochHeader->blockOffset[0] = (sizeof(blockchain_epoch_header_t) + BLOCK_ALIGNMENT - 1) & ~(BLOCK_ALIGNMENT - 1);
 		}
 
 		openEpochs.put(epochNumber, epochMmap);

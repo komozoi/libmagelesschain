@@ -28,54 +28,12 @@
 #include "blockchain/BlockchainFrontend.h"
 #include "blockchain/Transaction.h"
 #include "blockchain/BlockchainConfig.h"
-#include "blockchain/BlockchainStateSnapshot.h"
+
+#include "testutil/TestChainDesign.h"
 
 
 namespace fs = std::filesystem;
 
-
-class TestState : public BlockchainStateSnapshot {
-public:
-	int sum = 0;
-	TestState(BlockchainBackend& backend, long blockNumber) : BlockchainStateSnapshot(backend, blockNumber) {}
-};
-
-class TestTransaction : public Transaction {
-public:
-	int value;
-	uint64_t timestamp;
-
-	TestTransaction(int val = 1) : value(val), timestamp(millis_since_epoch()) {}
-
-	bool verify(BlockchainStateSnapshot&) const override { return true; }
-	bool write(BlockchainStateSnapshot& snapshot) const override {
-		TestState& s = (TestState&)snapshot;
-		s.sum += value;
-		return true;
-	}
-	float computeValue(BlockchainStateSnapshot&) const override { return 1.0f; }
-
-	uint8_t getTypeId() const override { return 1; }
-	uint64_t getTimestamp() const override { return timestamp; }
-
-	void write(MmapHandle* dst) const override {
-		dst->write(getTypeId());
-		dst->write(timestamp);
-		dst->write(value);
-	}
-
-	size_t size() const override { return sizeof(uint8_t) + sizeof(uint64_t) + sizeof(int); }
-
-	static sp<Transaction> createFromMmap(MmapHandle* src) {
-		uint64_t ts;
-		int val;
-		src->read(ts);
-		src->read(val);
-		sp<TestTransaction> tx = sp<TestTransaction>::create(val);
-		tx.mut().timestamp = ts;
-		return tx;
-	}
-};
 
 class BlockchainFrontendTest : public ::testing::Test {
 protected:
@@ -253,9 +211,13 @@ TEST_F(BlockchainFrontendTest, TransactionQueryById) {
 	}
 
 	// ID = (blockHeight << 20) | index
-	uint64_t id = (1ULL << 20) | 3;
-	sp<Transaction> tx2 = frontend.getTransactionById(id);
-	EXPECT_TRUE(tx2);
+	uint64_t id = (0ULL << 20) | 3;
+	sp<Transaction> tx4 = frontend.getTransactionById(id);
+
+	TestState state(backend, 1);
+	EXPECT_EQ(state.sum, 0);
+	EXPECT_TRUE(tx4->apply(state));
+	EXPECT_EQ(state.sum, 3);
 }
 
 TEST_F(BlockchainFrontendTest, BlockBuilderTiming) {
@@ -291,6 +253,7 @@ TEST_F(BlockchainFrontendTest, BlockBuilderTiming) {
         usleep(10000);
     }
     uint64_t end = millis_since_epoch();
+    usleep(20000); // Wait a bit more for backend to update lastBlockTime
     uint64_t elapsed = end - start;
 
     // Should take about 1s (within 5% = 50ms)

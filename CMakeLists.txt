@@ -46,6 +46,7 @@ if(GTest_FOUND)
     file(GLOB_RECURSE TEST_SOURCES
         "src/blockchain/tests/*.cpp"
         "src/storage/tests/*.cpp"
+        "src/testutil/*.cpp"
     )
 
     add_executable(tests src/testmain.cpp ${TEST_SOURCES} ${SOURCES})

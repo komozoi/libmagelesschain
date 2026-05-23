@@ -25,13 +25,13 @@ class BlockchainBackend;
 
 class BlockchainStateSnapshot {
 public:
-	BlockchainStateSnapshot(BlockchainBackend& backend, long blockNumber);
+	BlockchainStateSnapshot(BlockchainBackend& backend, long blockHeight);
 
 	virtual ~BlockchainStateSnapshot() = default;
 
 private:
 	BlockchainBackend& backend;
-	long blockNumber;
+	long blockHeight;
 };
 
 

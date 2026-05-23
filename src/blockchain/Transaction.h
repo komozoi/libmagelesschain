@@ -28,7 +28,7 @@ class BlockchainStateSnapshot;
 class Transaction {
 public:
 	virtual bool verify(BlockchainStateSnapshot& snapshot) const = 0;
-	virtual bool write(BlockchainStateSnapshot& snapshot) const = 0;
+	virtual bool apply(BlockchainStateSnapshot& snapshot) const = 0;
 	virtual float computeValue(BlockchainStateSnapshot& snapshot) const = 0;
 
 	virtual void write(MmapHandle* dst) const = 0;

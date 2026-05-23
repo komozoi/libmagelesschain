@@ -22,5 +22,5 @@
 #include "BlockchainBackend.h"
 
 
-BlockchainStateSnapshot::BlockchainStateSnapshot(BlockchainBackend& backend, long blockNumber) : backend(backend), blockNumber(blockNumber) {
+BlockchainStateSnapshot::BlockchainStateSnapshot(BlockchainBackend& backend, long blockHeight) : backend(backend), blockHeight(blockHeight) {
 }
