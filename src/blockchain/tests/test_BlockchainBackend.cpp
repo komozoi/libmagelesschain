@@ -26,7 +26,6 @@
 
 #include "testutil/TestChainDesign.h"
 
-namespace fs = std::filesystem;
 
 
 
@@ -43,18 +42,18 @@ protected:
 		uint64_t seconds = millis_since_epoch() / 1000;
 		std::string testName = ::testing::UnitTest::GetInstance()->current_test_info()->name();
 		testDir = "cmake-build-debug/test_data/" + std::to_string(seconds) + "-" + testName;
-		fs::create_directories(testDir);
+		std::filesystem::create_directories(testDir);
 	}
 
 	void TearDown() override {
-		if (!testDir.empty() && fs::exists(testDir)) {
-			fs::remove_all(testDir);
+		if (!testDir.empty() && std::filesystem::exists(testDir)) {
+			std::filesystem::remove_all(testDir);
 		}
 	}
 };
 
 TEST_F(BlockchainBackendTest, InitialState) {
-	BlockchainBackend backend(logger, testDir);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
 	EXPECT_EQ(backend.getBlockHeight(), 0);
 	EXPECT_EQ(backend.getLastBlockTimestamp(), 0);
 }
@@ -63,7 +62,7 @@ TEST_F(BlockchainBackendTest, AddAndGetBlock) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 100;
 	config.targetThroughput = 1;
-	BlockchainBackend backend(logger, testDir, config);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
 
 	ArrayList<sp<Transaction>> txs;
 	txs.add(sp<TestTransaction>::create(100));
@@ -83,7 +82,7 @@ TEST_F(BlockchainBackendTest, MiningTooEarly) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 1000;
 	config.targetThroughput = 10;
-	BlockchainBackend backend(logger, testDir, config);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
 
 	ArrayList<sp<Transaction>> txs;
 	txs.add(sp<TestTransaction>::create(1));
@@ -102,7 +101,7 @@ TEST_F(BlockchainBackendTest, Persistence) {
 	{
 		BlockchainConfig config;
 		config.targetBlockTimeMs = 100;
-		BlockchainBackend backend(logger, testDir, config);
+		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
 		ArrayList<sp<Transaction>> txs;
 		txs.add(sp<TestTransaction>::create(42));
 		backend.addBlock(txs);
@@ -110,8 +109,9 @@ TEST_F(BlockchainBackendTest, Persistence) {
 	}
 
 	{
-		BlockchainBackend backend(logger, testDir);
+		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
 		EXPECT_EQ(backend.getBlockHeight(), 1);
+		EXPECT_EQ(((const TestState&)*backend.getLatestState()).sum, 42);
 		ArrayList<sp<Transaction>> retrievedTxs = backend.getBlock(0);
 		EXPECT_EQ(retrievedTxs.size(), 1);
 		EXPECT_EQ(((const TestTransaction&)*retrievedTxs.get(0)).value, 42);
@@ -119,7 +119,7 @@ TEST_F(BlockchainBackendTest, Persistence) {
 }
 
 TEST_F(BlockchainBackendTest, InvalidBlockRange) {
-	BlockchainBackend backend(logger, testDir);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
 	EXPECT_THROW(backend.getBlock(0), std::range_error);
 	EXPECT_THROW(backend.getBlock(1), std::range_error);
 }
@@ -128,7 +128,7 @@ TEST_F(BlockchainBackendTest, TimeWindowQuery) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 100;
 	config.targetThroughput = 1;
-	BlockchainBackend backend(logger, testDir, config);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
 
 	uint64_t t1 = millis_since_epoch();
 	usleep(1000);
@@ -165,7 +165,7 @@ TEST_F(BlockchainBackendTest, MultipleBlocksInOneEpoch) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 10;
 	config.targetThroughput = 1;
-	BlockchainBackend backend(logger, testDir, config);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
 
 	for (int i = 1; i <= 10; ++i) {
 		ArrayList<sp<Transaction>> txs;

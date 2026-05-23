@@ -19,6 +19,15 @@
 #ifndef LIBMAGELESSCHAIN_MEVBUILDER_H
 #define LIBMAGELESSCHAIN_MEVBUILDER_H
 
+#include <alloc/pointer.h>
+#include <ds/ArrayList.h>
+
+#include "Transaction.h"
+#include "BlockchainStateSnapshot.h"
+
+
+class BlockchainBackend;
+
 
 /**
  * @class MEVBuilder
@@ -28,20 +37,45 @@
  *
  * In traditional blockchains, MEV (Maximum Extractable Value) refers to the
  * practice of extracting value from transactions by strategically ordering
- * them within a block. In this case, value is found not in financial gain,
- * but in the effectiveness of the on-chain data.
+ * them within a block. In this case, value is flexibly defined by the transaction
+ * subclass, so we can optimize for other metrics like success rate, priority, etc.
  *
- * This class provides logic to build blocks
- * while prioritizing transaction success, data completeness, and data conciseness.
+ * This class provides logic to build blocks while optimizing for this "value"
+ * defined by the subclass.
  *
- * The ideal block includes as many transactions as possible, fails none of them,
- * encodes the data as small as possible, and keeps it effectively indexed.
+ * One possible optimization strategy:
+ *  - The ideal block includes as many transactions as possible, fails none of them,
+ *    encodes the data as small as possible, and keeps it effectively indexed.
+ *
+ * These variables are affected by execution order and other details, so a MEV
+ * builder is warranted.
  *
  * It is the job of the chain state and transaction failure logic to ensure that
  * data inconsistencies cannot be introduced, so this class does not worry about
  * these concerns.
  */
 class MEVBuilder {
+public:
+	MEVBuilder(BlockchainBackend& backend);
+
+	/**
+	 * Builds a block by selecting transactions from the mempool that optimize for the defined "value".
+	 *
+	 * This method follows this process:
+	 * 1. Select the top maxTransactions transactions from the mempool, prioritizing those that optimize for the defined "value".
+	 * 2. While time remains and further optimization is possible, try to reorder or change transactions to improve the total value.
+	 * 3. Remove selected transactions from the mempool.
+	 * 4. Return the selected transactions in the order that they should be executed.
+	 *
+	 * @param mempool List of transactions to consider for inclusion in the block.  Selected transactions are removed from the list.
+	 * @param maxTransactions Maximum number of transactions to include in the block
+	 * @param deadline Timestamp by which the block must be built
+	 * @return List of transactions included in the built block, in the order that they should be executed
+	 */
+	ArrayList<sp<Transaction>> buildBlock(ArrayList<sp<Transaction>>& mempool, uint16_t maxTransactions, uint64_t deadline) const;
+
+private:
+	BlockchainBackend& backend;
 };
 
 

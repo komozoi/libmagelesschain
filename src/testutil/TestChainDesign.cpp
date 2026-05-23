@@ -23,8 +23,8 @@
 TestState::TestState(BlockchainBackend& backend, long blockHeight)
 	: BlockchainStateSnapshot(backend, blockHeight) {}
 
-TestTransaction::TestTransaction(int val)
-	: value(val), timestamp(millis_since_epoch()) {}
+TestTransaction::TestTransaction(int val, int id)
+	: value(val), timestamp(millis_since_epoch()), id(id) {}
 
 bool TestTransaction::verify(BlockchainStateSnapshot&) const {
 	return true;
@@ -33,11 +33,22 @@ bool TestTransaction::verify(BlockchainStateSnapshot&) const {
 bool TestTransaction::apply(BlockchainStateSnapshot& snapshot) const {
 	TestState& s = (TestState&)snapshot;
 	s.sum += value;
+	s.count++;
 	return true;
 }
 
-float TestTransaction::computeValue(BlockchainStateSnapshot&) const {
-	return 1.0f;
+float TestTransaction::computeValue(BlockchainStateSnapshot& snapshot) const {
+	TestState& s = (TestState&)snapshot;
+	if (id == 2) {
+		return (s.count > 0) ? 20.0f : 5.0f;
+	}
+	if (id == 1) {
+		return 10.0f;
+	}
+	if (id == 3) {
+		return (s.count == 0) ? 15.0f : 1.0f;
+	}
+	return (float)value;
 }
 
 uint8_t TestTransaction::getTypeId() const {
@@ -52,18 +63,21 @@ void TestTransaction::write(MmapHandle* dst) const {
 	dst->write(getTypeId());
 	dst->write(timestamp);
 	dst->write(value);
+	dst->write(id);
 }
 
 size_t TestTransaction::size() const {
-	return sizeof(uint8_t) + sizeof(uint64_t) + sizeof(int);
+	return sizeof(uint8_t) + sizeof(uint64_t) + sizeof(int) + sizeof(int);
 }
 
 sp<Transaction> TestTransaction::createFromMmap(MmapHandle* src) {
 	uint64_t ts;
 	int val;
+	int id;
 	src->read(ts);
 	src->read(val);
-	sp<TestTransaction> tx = sp<TestTransaction>::create(val);
+	src->read(id);
+	sp<TestTransaction> tx = sp<TestTransaction>::create(val, id);
 	tx.mut().timestamp = ts;
 	return tx;
 }

@@ -27,6 +27,7 @@
 class TestState : public BlockchainStateSnapshot {
 public:
 	int sum = 0;
+	int count = 0;
 	TestState(BlockchainBackend& backend, long blockHeight);
 };
 
@@ -34,8 +35,9 @@ class TestTransaction : public Transaction {
 public:
 	int value;
 	uint64_t timestamp;
+	int id;
 
-	TestTransaction(int val = 1);
+	TestTransaction(int val = 1, int id = 0);
 
 	bool verify(BlockchainStateSnapshot& snapshot) const override;
 	bool apply(BlockchainStateSnapshot& snapshot) const override;

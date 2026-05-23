@@ -44,7 +44,7 @@ struct block_header_t {
  */
 class BlockchainBackend {
 public:
-	explicit BlockchainBackend(Logger& logger, const std::string& dataDir, BlockchainConfig config = {});
+	explicit BlockchainBackend(Logger& logger, const std::string& dataDir, const sp<BlockchainStateSnapshot>& initialState, BlockchainConfig config = {});
 
 	// Only one instance of this should probably exist at a time.
 	BlockchainBackend(BlockchainBackend const&) = delete;
@@ -58,6 +58,8 @@ public:
 	uint64_t getLastBlockTimestamp() const;
 	uint64_t getLastBlockTime() const;
 
+	sp<BlockchainStateSnapshot> getLatestState() const { return latestState; }
+
 	const BlockchainConfig& getConfig() const { return config; }
 	const std::string& getDataDir() const { return dataDir; }
 
@@ -69,13 +71,14 @@ private:
 
 	BlockchainConfig config;
 	std::string dataDir;
-	HashMap<uint32_t, MmapHandle*> openEpochs;
+	HashMap<uint32_t, sp<MmapHandle>> openEpochs;
 	MmapHandle metadataFile;
 	blockchain_metadata_header_t* header;
 
 	LogEndpoint log;
 
-	uint64_t lastBlockTime;
+	uint64_t lastBlockTime = 0;
+	sp<BlockchainStateSnapshot> latestState;
 };
 
 

@@ -23,6 +23,7 @@
 #include <atomic>
 #include "BlockchainBackend.h"
 #include "BlockchainConfig.h"
+#include "MEVBuilder.h"
 
 
 /*
@@ -34,7 +35,7 @@
  */
 class BlockchainFrontend {
 public:
-	BlockchainFrontend(BlockchainBackend& backend, sp<BlockchainStateSnapshot> initialState, BlockchainConfig config = {});
+	BlockchainFrontend(BlockchainBackend& backend, BlockchainConfig config = {});
 	~BlockchainFrontend();
 
 	// Only one global instance of this should really exist
@@ -54,13 +55,13 @@ public:
 	sp<BlockchainStateSnapshot> getState() const { return state; }
 
 private:
-	void reapplyHistory();
 	void blockBuilderLoop();
 	void saveMempool();
 	void loadMempool();
 
 	BlockchainBackend& backend;
 	BlockchainConfig config;
+	MEVBuilder mevBuilder;
 	sp<BlockchainStateSnapshot> state;
 	ArrayList<sp<Transaction>> mempool;
 	std::mutex mempoolMutex;

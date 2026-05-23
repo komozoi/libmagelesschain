@@ -60,8 +60,8 @@ protected:
 };
 
 TEST_F(BlockchainFrontendTest, BasicInitialState) {
-	BlockchainBackend backend(logger, testDir);
-	BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0));
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+	BlockchainFrontend frontend(backend);
 
 	EXPECT_EQ(frontend.getBlockHeight(), 0);
 	EXPECT_EQ(frontend.getMempoolSize(), 0);
@@ -69,8 +69,8 @@ TEST_F(BlockchainFrontendTest, BasicInitialState) {
 }
 
 TEST_F(BlockchainFrontendTest, AddTransactionToMempool) {
-	BlockchainBackend backend(logger, testDir);
-	BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0));
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+	BlockchainFrontend frontend(backend);
 
 	sp<TestTransaction> tx = sp<TestTransaction>::create(10);
 	frontend.sendTransaction(tx);
@@ -84,8 +84,8 @@ TEST_F(BlockchainFrontendTest, BuildBlockOnTransactionCount) {
 	config.targetBlockTimeMs = 1000;
 	config.targetThroughput = 10;
 
-	BlockchainBackend backend(logger, testDir, config);
-	BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0), config);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+	BlockchainFrontend frontend(backend, config);
 
 	for (int i = 0; i < 30; ++i) {
 		frontend.sendTransaction(sp<TestTransaction>::create(1));
@@ -108,8 +108,8 @@ TEST_F(BlockchainFrontendTest, BasicStateRecovery) {
 		BlockchainConfig config;
 		config.targetBlockTimeMs = 100; // Fast for test
 		config.targetThroughput = 10;
-		BlockchainBackend backend(logger, testDir, config);
-		BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0), config);
+		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+		BlockchainFrontend frontend(backend, config);
 
 		for (int i = 0; i < 30; ++i) {
 			frontend.sendTransaction(sp<TestTransaction>::create(2));
@@ -126,8 +126,8 @@ TEST_F(BlockchainFrontendTest, BasicStateRecovery) {
 
 	// Reload
 	{
-		BlockchainBackend backend(logger, testDir);
-		BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0));
+		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+		BlockchainFrontend frontend(backend);
 		EXPECT_GT(frontend.getBlockHeight(), 0);
 		EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 60);
 	}
@@ -138,8 +138,8 @@ TEST_F(BlockchainFrontendTest, AdvancedStateRecovery) {
 		BlockchainConfig config;
 		config.targetBlockTimeMs = 100;
 		config.targetThroughput = 10;
-		BlockchainBackend backend(logger, testDir, config);
-		BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0), config);
+		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+		BlockchainFrontend frontend(backend, config);
 
 		for (int i = 0; i < 30; ++i) {
 			frontend.sendTransaction(sp<TestTransaction>::create(1));
@@ -161,8 +161,8 @@ TEST_F(BlockchainFrontendTest, AdvancedStateRecovery) {
 
 	// Reload
 	{
-		BlockchainBackend backend(logger, testDir);
-		BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0));
+		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+		BlockchainFrontend frontend(backend);
 		// Wait a bit for mempool to load and background thread to possibly do something
 		usleep(200000);
 
@@ -175,8 +175,8 @@ TEST_F(BlockchainFrontendTest, AdvancedStateRecovery) {
 }
 
 TEST_F(BlockchainFrontendTest, TimeQueryFeature) {
-	BlockchainBackend backend(logger, testDir);
-	BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0));
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+	BlockchainFrontend frontend(backend);
 
 	uint64_t start = millis_since_epoch();
 	usleep(10000);
@@ -197,8 +197,8 @@ TEST_F(BlockchainFrontendTest, TransactionQueryById) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 10;
 	config.targetThroughput = 10;
-	BlockchainBackend backend(logger, testDir, config);
-	BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0), config);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+	BlockchainFrontend frontend(backend, config);
 
 	// Add transactions and wait for block
 	for (int i = 0; i < 20; ++i) {
@@ -217,15 +217,17 @@ TEST_F(BlockchainFrontendTest, TransactionQueryById) {
 	TestState state(backend, 1);
 	EXPECT_EQ(state.sum, 0);
 	EXPECT_TRUE(tx4->apply(state));
-	EXPECT_EQ(state.sum, 3);
+	// MEVBuilder sorts by value descending. Top 10 are 19, 18, 17, 16, 15, 14, 13, 12, 11, 10.
+	// Index 3 is value 16.
+	EXPECT_EQ(state.sum, 16);
 }
 
 TEST_F(BlockchainFrontendTest, BlockBuilderTiming) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 1000;
 	config.targetThroughput = 10;
-	BlockchainBackend backend(logger, testDir, config);
-	BlockchainFrontend frontend(backend, sp<TestState>::create(backend, 0), config);
+	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+	BlockchainFrontend frontend(backend, config);
 
 	// Sanity check
 	EXPECT_EQ(frontend.getBlockHeight(), 0);
@@ -238,7 +240,10 @@ TEST_F(BlockchainFrontendTest, BlockBuilderTiming) {
 	}
 
 	// Adding half the transaction size target should immediately trigger block creation
-	usleep(5000);
+	int firstBlockRetries = 100;
+	while (frontend.getBlockHeight() == 0 && firstBlockRetries-- > 0) {
+		usleep(10000);
+	}
 	EXPECT_EQ(frontend.getBlockHeight(), 1);
 
     // Create the second block; this should take about 1s (within 5% = 50ms)

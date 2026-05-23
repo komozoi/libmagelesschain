@@ -17,6 +17,7 @@
  */
 
 #include "BlockchainBackend.h"
+#include "BlockchainStateSnapshot.h"
 
 #include <fcntl.h>
 
@@ -61,8 +62,8 @@ struct blockchain_epoch_header_t {
 };
 
 
-BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir, BlockchainConfig config)
-	: config(config), dataDir(dataDir), openEpochs(32), log(logger, "BlockchainBackend") {
+BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir, const sp<BlockchainStateSnapshot>& initialState, BlockchainConfig config)
+	: config(config), dataDir(dataDir), openEpochs(32), log(logger, "BlockchainBackend"), latestState(initialState.copy(UNIQUE)) {
 	mkdir(dataDir.c_str(), 0770);
 	mkdir((dataDir + "/epochs").c_str(), 0770);
 	FdHandle metadataHandle = FdHandle::open((dataDir + "/metadata.bin").c_str(), O_RDWR | O_CREAT, 0660);
@@ -70,6 +71,19 @@ BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir,
 	header = metadataFile.directPointer<blockchain_metadata_header_t>();
 	if (metadataHandle.isNew()) {
 		*header = {CURRENT_FILE_VERSION, 0, 0};
+	}
+
+	// Reapply history to the latest state if it exists
+	// TODO: This should rely on the indexing, and never replay transactions.
+	//       This allows us to test for now though.
+	if (latestState) {
+		long height = header->currentBlockHeight;
+		for (long h = 0; h < height; ++h) {
+			ArrayList<sp<Transaction>> transactions = getBlock(h);
+			for (const sp<Transaction>& tx : transactions) {
+				tx->apply(latestState.mut());
+			}
+		}
 	}
 }
 
@@ -128,6 +142,12 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 	log.debug("New block mined with %u transactions at %u transactions per minute.", transactions.size(), (uint32_t)(transactions.size() * 60000 / duration));
 
 	msync(header, sizeof(blockchain_metadata_header_t), MS_SYNC);
+
+	if (latestState) {
+		for (const sp<Transaction>& tx : transactions) {
+			tx->apply(latestState.mut());
+		}
+	}
 
 	lastBlockTime = duration;
 
@@ -207,20 +227,22 @@ uint32_t BlockchainBackend::getBlockOffset(uint64_t blockNumber) {
 MmapHandle* BlockchainBackend::getEpochFile(uint64_t blockNumber) {
 	uint32_t epochNumber = (uint32_t)(blockNumber / BLOCKS_PER_EPOCH);
 	if (!openEpochs.hasKey(epochNumber)) {
+		// TODO: This should be replaced with some kind of cache
+		// Might be a good idea to add something like a "FileCache" to LibExcessive
 		while (openEpochs.size() >= MAX_OPEN_EPOCH_FILES) {
 			// Remove a random epoch file from open set
 			int index = rand() % (int)openEpochs.getCapacity();
 			if (openEpochs.presentAtIndex(index)) {
-				delete openEpochs.remove(openEpochs.keyAtIndex(index));
+				openEpochs.drop(openEpochs.keyAtIndex(index));
 				break;
 			}
 		}
 
 		FdHandle epochFile = FdHandle::open((dataDir + "/epochs/" + std::to_string(epochNumber) + ".bin").c_str(), O_RDWR | O_CREAT, 0660);
-		MmapHandle* epochMmap = new MmapHandle(epochFile.getMmapHandle(0, epochFile.seek(1024 * 1024, SEEK_END)));
+		MmapHandle epochMmap = epochFile.getMmapHandle(0, epochFile.seek(1024 * 1024, SEEK_END));
 		if (epochFile.isNew()) {
 			// Initialize the file
-			blockchain_epoch_header_t* epochHeader = epochMmap->directPointer<blockchain_epoch_header_t>();
+			blockchain_epoch_header_t* epochHeader = epochMmap.directPointer<blockchain_epoch_header_t>();
 			epochHeader->version = CURRENT_FILE_VERSION;
 			epochHeader->blocksPerEpoch = BLOCKS_PER_EPOCH;
 			epochHeader->epoch = epochNumber;
@@ -229,17 +251,12 @@ MmapHandle* BlockchainBackend::getEpochFile(uint64_t blockNumber) {
 			epochHeader->blockOffset[0] = (sizeof(blockchain_epoch_header_t) + BLOCK_ALIGNMENT - 1) & ~(BLOCK_ALIGNMENT - 1);
 		}
 
-		openEpochs.put(epochNumber, epochMmap);
-		return epochMmap;
+		openEpochs.put(epochNumber, sp<MmapHandle>::create(std::move(epochMmap)));
 	}
 
-	return openEpochs.get(epochNumber);
+	return openEpochs.get(epochNumber).get();
 }
 
 BlockchainBackend::~BlockchainBackend() {
-	for (int i = 0; i < openEpochs.getCapacity(); ++i)
-		if (openEpochs.presentAtIndex(i))
-			delete openEpochs.valueAtIndex(i);
-
 	openEpochs.clear();
 }

@@ -41,26 +41,28 @@ target_compile_options(LibMagelessChain PRIVATE -fsanitize=address)
 target_include_directories(LibMagelessChain PUBLIC src)
 target_link_libraries(LibMagelessChain PUBLIC excessive)
 
-find_package(GTest)
-if(GTest_FOUND)
-    file(GLOB_RECURSE TEST_SOURCES
-        "src/blockchain/tests/*.cpp"
-        "src/storage/tests/*.cpp"
-        "src/testutil/*.cpp"
-    )
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    find_package(GTest)
+    if(GTest_FOUND)
+        file(GLOB_RECURSE TEST_SOURCES
+            "src/blockchain/tests/*.cpp"
+            "src/storage/tests/*.cpp"
+            "src/testutil/*.cpp"
+        )
 
-    add_executable(tests src/testmain.cpp ${TEST_SOURCES} ${SOURCES})
-    target_include_directories(tests PRIVATE src ${KTRANSFORMERS_INCLUDE_DIRS} ${excessive_SOURCE_DIR}/include)
-    target_compile_options(tests PRIVATE
-        -Wall -Wextra -Werror -Wno-format -Wno-unused-parameter -Wno-unused-result
-        -fexec-charset=UTF-8 -fextended-identifiers -finput-charset=UTF-8
-        -fsanitize=address
-    )
-    target_link_options(tests PRIVATE -fsanitize=address)
-    target_link_libraries(tests PRIVATE
-        excessive
-        GTest::gtest
-        GTest::gtest_main
-    )
+        add_executable(mageless_tests src/testmain.cpp ${TEST_SOURCES} ${SOURCES})
+        target_include_directories(mageless_tests PRIVATE src ${KTRANSFORMERS_INCLUDE_DIRS} ${excessive_SOURCE_DIR}/include)
+        target_compile_options(mageless_tests PRIVATE
+            -Wall -Wextra -Werror -Wno-format -Wno-unused-parameter -Wno-unused-result
+            -fexec-charset=UTF-8 -fextended-identifiers -finput-charset=UTF-8
+            -fsanitize=address
+        )
+        target_link_options(mageless_tests PRIVATE -fsanitize=address)
+        target_link_libraries(mageless_tests PRIVATE
+            excessive
+            GTest::gtest
+            GTest::gtest_main
+        )
+    endif()
 endif()
 

@@ -23,9 +23,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-BlockchainFrontend::BlockchainFrontend(BlockchainBackend& backend, sp<BlockchainStateSnapshot> initialState, BlockchainConfig config)
-	: backend(backend), config(config), state(initialState), running(true) {
-	reapplyHistory();
+BlockchainFrontend::BlockchainFrontend(BlockchainBackend& backend, BlockchainConfig config)
+	: backend(backend), config(config), mevBuilder(backend), state(backend.getLatestState()), running(true) {
 	loadMempool();
 	builderThread = std::thread(&BlockchainFrontend::blockBuilderLoop, this);
 }
@@ -43,46 +42,30 @@ void BlockchainFrontend::sendTransaction(const sp<Transaction>& transaction) {
 	mempool.add(transaction);
 }
 
-void BlockchainFrontend::reapplyHistory() {
-	if (!state) return;
-	long height = backend.getBlockHeight();
-	for (long h = 0; h < height; ++h) {
-		ArrayList<sp<Transaction>> transactions = backend.getBlock(h);
-		for (const sp<Transaction>& tx : transactions) {
-			tx->apply(state.mut());
-		}
-	}
-}
-
 void BlockchainFrontend::blockBuilderLoop() {
 	while (running) {
+		usleep(10000);
+
+		// TODO: Check if block building should be done
+		//       Deadline computation is part of this
+		uint64_t deadline = millis_since_epoch() + 10;
+
 		ArrayList<sp<Transaction>> toBuild;
 		{
 			std::lock_guard _(mempoolMutex);
 			if (mempool.size() > 0) {
-				for (const sp<Transaction>& tx : mempool) {
-					toBuild.add(tx);
-				}
+				toBuild = mevBuilder.buildBlock(mempool, config.targetThroughput, deadline);
 			}
 		}
 
 		if (toBuild.size() > 0) {
 			long blockNumber = backend.addBlock(toBuild);
-			if (blockNumber != -1) {
+			if (blockNumber == -1) {
+				// Re-insert transactions if block building failed (e.g. too early)
 				std::lock_guard _(mempoolMutex);
-				int numToRemove = toBuild.size();
-				for (int i = 0; i < numToRemove; ++i) {
-					if (mempool.size() > 0) {
-						for (int j = 0; j < mempool.size() - 1; ++j) {
-							mempool.set(j, std::move(mempool.get(j+1)));
-						}
-						mempool.pop();
-					}
-				}
+				mempool.addMany(toBuild);
 			}
 		}
-
-		usleep(10000);
 	}
 }
 

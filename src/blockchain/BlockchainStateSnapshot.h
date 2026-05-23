@@ -29,9 +29,9 @@ public:
 
 	virtual ~BlockchainStateSnapshot() = default;
 
-private:
+protected:
 	BlockchainBackend& backend;
-	long blockHeight;
+	const long blockHeight;
 };
 
 
