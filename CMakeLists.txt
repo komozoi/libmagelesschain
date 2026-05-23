@@ -38,8 +38,8 @@ target_compile_options(LibMagelessChain PRIVATE
 target_link_options(LibMagelessChain PRIVATE -fsanitize=address)
 target_compile_options(LibMagelessChain PRIVATE -fsanitize=address)
 
-target_include_directories(LibMagelessChain PRIVATE src ${excessive_SOURCE_DIR}/include)
-target_link_libraries(LibMagelessChain PRIVATE excessive)
+target_include_directories(LibMagelessChain PUBLIC src)
+target_link_libraries(LibMagelessChain PUBLIC excessive)
 
 find_package(GTest)
 if(GTest_FOUND)
