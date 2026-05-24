@@ -36,7 +36,7 @@ jobs:
       run: cmake -B cmake-build-debug -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
-      run: cmake --build cmake-build-debug --config Release --target tests
+      run: cmake --build cmake-build-debug --config Release --target mageless_tests
 
     - name: Test
-      run: ./cmake-build-debug/tests
+      run: ./cmake-build-debug/mageless_tests
