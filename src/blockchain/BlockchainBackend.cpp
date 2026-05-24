@@ -24,6 +24,7 @@
 #include <stdexcept>
 
 #include "universaltime.h"
+#include "hash.h"
 
 #define FILE_VERSION_00_00_00 0xC7000000
 #define CURRENT_FILE_VERSION FILE_VERSION_00_00_00
@@ -77,27 +78,49 @@ BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir,
 	this->design.mut().registerOverrides(overrideReg);
 	this->design.mut().registerTransactionTypes(txTypes);
 
-	// Build the interim committed-state override and replay the journal.
-	committedInterim = sp<StateOverride>::create(overrideReg);
-	replayJournalIntoCommittedOverride();
+	// Storage layer: catalog tracks segment locations and integrity;
+	// container manager owns the per-index payload containers.  Both live
+	// under dataDir/ so a chain's storage is fully contained.
+	catalog = sp<Catalog>::create(dataDir + "/catalog");
+	containerManager = sp<IndexContainerManager>::create(dataDir + "/indexes");
+
+	// Wire each registered index to its on-disk storage so it can answer
+	// queries by mmap'ing segments from the catalog.  No transaction
+	// replay and no in-RAM state reconstruction; the segments themselves
+	// are the materialized committed state.
+	attachIndexesToStorage();
 }
 
-void BlockchainBackend::replayJournalIntoCommittedOverride() {
-	long height = header->currentBlockHeight;
-	for (long h = 0; h < height; ++h) {
-		ArrayList<sp<Transaction>> transactions = getBlock(h);
-		for (const sp<Transaction>& tx : transactions) {
-			tx->apply(committedInterim.mut());
-		}
+void BlockchainBackend::attachIndexesToStorage() {
+	const ArrayList<BackendRegistry::Entry>& entries = indexes.getEntries();
+	for (int i = 0; i < entries.size(); ++i) {
+		const BackendRegistry::Entry& e = entries.get(i);
+		uint16_t persistentTypeId = (uint16_t)i;
+		sp<BlockchainIndex> idx = indexes.getIndexAt(persistentTypeId);
+		if (!idx) continue;
+		idx.mut().attach(catalog.get(), containerManager.get(), persistentTypeId, e.id);
+	}
+}
+
+void BlockchainBackend::attachOverrideFamilies(StateOverride& state) const {
+	int n = state.familySize();
+	const ArrayList<BackendRegistry::Entry>& indexEntries = indexes.getEntries();
+	int pairCount = (n < indexEntries.size()) ? n : indexEntries.size();
+	for (int i = 0; i < pairCount; ++i) {
+		sp<BlockchainIndex> idx = indexes.getIndexAt((uint16_t)i);
+		if (!idx) continue;
+		state.familyAt(i).attach(idx.mut());
 	}
 }
 
 sp<StateOverride> BlockchainBackend::newStateOverride() const {
-	// Deep copy so the caller can mutate freely without disturbing the
-	// committed state.  Once segment-backed indexes land, this will return
-	// a fresh empty StateOverride that reads through the indexes for
-	// committed data.
-	return committedInterim.copy(UNIQUE);
+	// Build a fresh, empty override and wire each family up to its
+	// matching index so read-through accessors and seal() can resolve
+	// committed state on demand via the catalog.  No deep copy of chain
+	// state, no replay: the committed state lives on disk in segments.
+	sp<StateOverride> s = sp<StateOverride>(UNIQUE, overrideReg);
+	attachOverrideFamilies(s.mut());
+	return s;
 }
 
 long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions) {
@@ -149,22 +172,142 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 		epochFileHeader->blockOffset[(blockNumber + 1) % BLOCKS_PER_EPOCH] = (nextOffset + BLOCK_ALIGNMENT - 1) & ~(BLOCK_ALIGNMENT - 1);
 	}
 
-	// Next write to the index
-	// TODO: Write to index
+	// Now seal the speculative state into per-index segments.  This
+	// applies the transactions' effects to the in-RAM index state, writes
+	// the resulting payload through the container manager, and inserts a
+	// catalog entry for each touched index.  We use a fresh override that
+	// starts from the just-loaded committed state, then applies the
+	// block's transactions exactly once.  This is the canonical
+	// "simulation becomes commit" flow.
+	sp<StateOverride> blockOverride = newStateOverride();
+	for (const sp<Transaction>& tx : transactions) {
+		tx->apply(blockOverride.mut());
+	}
+	sealOverrideToSegments(blockOverride.mut(), blockNumber);
 
 	log.debug("New block mined with %u transactions at %u transactions per minute.", transactions.size(), (uint32_t)(transactions.size() * 60000 / duration));
 
 	msync(header, sizeof(blockchain_metadata_header_t), MS_SYNC);
 
-	// Apply the block's transactions into the interim committed state so
-	// subsequent calls to newStateOverride() see the new state.
-	for (const sp<Transaction>& tx : transactions) {
-		tx->apply(committedInterim.mut());
-	}
-
 	lastBlockTime = duration;
 
 	return (long)blockNumber;
+}
+
+void BlockchainBackend::sealOverrideToSegments(StateOverride& state, uint64_t blockNumber) {
+	const ArrayList<BackendRegistry::Entry>& indexEntries = indexes.getEntries();
+	int n = state.familySize();
+	int pairCount = (n < indexEntries.size()) ? n : indexEntries.size();
+	for (int i = 0; i < pairCount; ++i) {
+		IndexOverrideFamilyBase& fam = state.familyAt(i);
+		Bytestring payload = fam.seal();
+		if (payload.size() == 0) continue;
+
+		sp<BlockchainIndex> idx = indexes.getIndexAt((uint16_t)i);
+		if (!idx) continue;
+
+		const BackendRegistry::Entry& e = indexEntries.get(i);
+		uint16_t persistentTypeId = (uint16_t)i;
+		uint8_t instanceId = e.id;
+
+		// Persist the payload through the container, then catalog it.
+		// The index is not notified directly: its next query discovers
+		// the new segment through the catalog and mmaps the payload
+		// from the container on demand.
+		IndexContainer* container = containerManager.mut().get(persistentTypeId, instanceId, 0);
+		uint64_t offset = container->writePayload(payload);
+
+		SegmentLocator loc = {};
+		loc.persistentTypeId = persistentTypeId;
+		loc.instanceId = instanceId;
+		loc.encodingVersion = idx->encodingVersion();
+		loc.mergeGeneration = 0;
+		loc.blockRangeStart = blockNumber;
+		loc.blockRangeEnd = blockNumber;
+		loc.containerId = 0;
+		loc.byteOffset = offset;
+		loc.byteLength = (uint64_t)payload.size();
+		loc.checksum = (uint64_t)excessiveFastHash(&payload[0], payload.size());
+		catalog.mut().insert(loc);
+
+		// Opportunistic compaction.
+		// TODO: Do this with a libexcessive ThreadPool in the background
+		maybeCompactIndex(persistentTypeId, instanceId, blockNumber);
+	}
+}
+
+void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t instanceId, uint64_t currentBlock) {
+	int count = catalog.mut().countSegments(persistentTypeId, instanceId);
+	if ((uint32_t)count <= config.maxSegmentsPerIndex) return;
+
+	ArrayList<SegmentLocator> all = catalog.mut().getAllSegments(persistentTypeId, instanceId);
+
+	// Find the two smallest mergeable (under the size threshold) segments.
+	int firstIdx = -1;
+	int secondIdx = -1;
+	for (int i = 0; i < all.size(); ++i) {
+		const SegmentLocator& s = all.get(i);
+		if (s.byteLength > config.maxMergeableSegmentBytes) continue;
+		if (firstIdx < 0) { firstIdx = i; continue; }
+		const SegmentLocator& smallest = all.get(firstIdx);
+		if (s.byteLength < smallest.byteLength) {
+			secondIdx = firstIdx;
+			firstIdx = i;
+		} else if (secondIdx < 0 || s.byteLength < all.get(secondIdx).byteLength) {
+			secondIdx = i;
+		}
+	}
+	if (firstIdx < 0 || secondIdx < 0) return;
+
+	const SegmentLocator& a = all.get((firstIdx < secondIdx) ? firstIdx : secondIdx);
+	const SegmentLocator& b = all.get((firstIdx < secondIdx) ? secondIdx : firstIdx);
+
+	sp<BlockchainIndex> idx = indexes.getIndexAt(persistentTypeId);
+	if (!idx) return;
+
+	IndexContainer* container = containerManager.mut().get(persistentTypeId, instanceId, 0);
+
+	// Ask the index to merge the input segments.  The index uses its
+	// attached catalog + container to mmap each input on demand and
+	// returns the combined payload.  An empty return aborts the merge.
+	ArrayList<SegmentLocator> mergeInputs;
+	mergeInputs.add(a);
+	mergeInputs.add(b);
+
+	Bytestring merged = idx->mergeSegments(mergeInputs);
+	if (merged.size() == 0) return;
+
+	uint64_t mergedOffset = container->writePayload(merged);
+
+	SegmentLocator out = {};
+	out.persistentTypeId = persistentTypeId;
+	out.instanceId = instanceId;
+	out.encodingVersion = idx->encodingVersion();
+	out.mergeGeneration = (a.mergeGeneration > b.mergeGeneration ? a.mergeGeneration : b.mergeGeneration) + 1;
+	out.blockRangeStart = (a.blockRangeStart < b.blockRangeStart) ? a.blockRangeStart : b.blockRangeStart;
+	out.blockRangeEnd = (a.blockRangeEnd > b.blockRangeEnd) ? a.blockRangeEnd : b.blockRangeEnd;
+	out.containerId = 0;
+	out.byteOffset = mergedOffset;
+	out.byteLength = (uint64_t)merged.size();
+	out.checksum = (uint64_t)excessiveFastHash(&merged[0], merged.size());
+	catalog.mut().insert(out);
+
+	// Delete the input catalog entries and return their disk regions to
+	// the container's FreeSpaceFile.  Merged-away segments are not kept
+	// around as "obsolete"; the merged output authoritatively covers
+	// their block range and the inputs are gone.
+	catalog.mut().remove(a);
+	catalog.mut().remove(b);
+	container->freeRegion(a.byteOffset, a.byteLength);
+	container->freeRegion(b.byteOffset, b.byteLength);
+
+	(void)currentBlock;
+	log.debug("Compacted index typeId=%u id=%u: merged segments [%lu,%lu] and [%lu,%lu] into [%lu,%lu] gen=%u",
+		(unsigned)persistentTypeId, (unsigned)instanceId,
+		(unsigned long)a.blockRangeStart, (unsigned long)a.blockRangeEnd,
+		(unsigned long)b.blockRangeStart, (unsigned long)b.blockRangeEnd,
+		(unsigned long)out.blockRangeStart, (unsigned long)out.blockRangeEnd,
+		(unsigned)out.mergeGeneration);
 }
 
 

@@ -58,7 +58,7 @@ protected:
 };
 
 static int currentSum(const BlockchainFrontend& frontend) {
-	return frontend.getState()->override<TestSumOverrideFamily>(0).sum;
+	return frontend.getState()->override<TestSumOverrideFamily>(0).sum();
 }
 
 TEST_F(BlockchainFrontendTest, BasicInitialState) {

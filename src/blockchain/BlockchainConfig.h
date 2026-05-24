@@ -24,6 +24,26 @@
 struct BlockchainConfig {
 	uint32_t targetBlockTimeMs = 60000;
 	uint32_t targetThroughput = 180;
+
+	/*
+	 * Segment count above which the backend will trigger a compaction on
+	 * an index instance.  Applications typically tune this to
+	 * some multiple of the number of available CPU threads so
+	 * background merges parallelize cleanly.  When the segment count
+	 * exceeds the threshold, the two smallest mergeable segments (each
+	 * under 500 MiB per the proposal) are merged into one.
+	 */
+	uint32_t maxSegmentsPerIndex = 64;
+
+	/*
+	 * Per-segment size limit beyond which a segment is no longer eligible
+	 * for merging.  512 MiB per the concrete proposal.
+	 *
+	 * This number is downstream of the maximum file size of ~2GiB.
+	 * Merging two 512MiB segments is not going to reach 2GiB, but
+	 * merging two 1GiB segments might.
+	 */
+	uint64_t maxMergeableSegmentBytes = 512ULL * 1024 * 1024;
 };
 
 #endif //LIBMAGELESSCHAIN_BLOCKCHAINCONFIG_H

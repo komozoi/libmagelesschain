@@ -21,6 +21,8 @@
 
 #include <cstdint>
 
+#include "BlockchainIndex.h"
+
 #include "alloc/pointer.h"
 #include "ds/ArrayList.h"
 
@@ -28,11 +30,16 @@
  * Erased family base.  Only used as the storage type inside BackendRegistry's
  * type-keyed table.  Application code never sees this; it always interacts
  * with the typed IndexFamily<T> through backend.index<T>(id).
+ *
+ * The base exposes a typeless getInstance() so the backend's commit and
+ * load paths can iterate registered indexes without knowing their concrete
+ * types.  Application code never calls this directly.
  */
 class IndexFamilyBase {
 public:
 	virtual ~IndexFamilyBase() = default;
 	virtual int instanceCount() const = 0;
+	virtual sp<BlockchainIndex> getInstance(uint8_t id) const = 0;
 };
 
 /*
@@ -56,6 +63,11 @@ public:
 
 	int instanceCount() const override {
 		return instances.size();
+	}
+
+	sp<BlockchainIndex> getInstance(uint8_t id) const override {
+		if ((int)id >= instances.size()) return sp<BlockchainIndex>();
+		return sp<BlockchainIndex>(instances.get(id));
 	}
 
 private:

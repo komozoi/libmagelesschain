@@ -90,6 +90,21 @@ public:
 	 */
 	void forEachFamily(void (*fn)(TypeKey, uint8_t, IndexOverrideFamilyBase&, void*), void* ctx);
 
+	/*
+	 * Number of registered override family slots, matching
+	 * StateOverrideRegistry::getEntries().size().  The slot at index N is
+	 * the same registration-order entry as registry.getEntries().get(N).
+	 */
+	int familySize() const { return order.size(); }
+
+	/*
+	 * Mutable access to the override family at registration-order slot N.
+	 * Used by the backend commit path to seal each family and pair it
+	 * one-to-one with the matching index.
+	 */
+	IndexOverrideFamilyBase& familyAt(int n);
+	const IndexOverrideFamilyBase& familyAt(int n) const;
+
 private:
 	HashMap<TypeKey, ArrayList<sp<IndexOverrideFamilyBase>>> families;
 	// Preserves registration order so forEachFamily walks families in a

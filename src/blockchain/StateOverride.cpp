@@ -84,3 +84,15 @@ void StateOverride::forEachFamily(void (*fn)(TypeKey, uint8_t, IndexOverrideFami
 		fn(s.key, s.id, family->get(s.id).mut(), ctx);
 	}
 }
+
+IndexOverrideFamilyBase& StateOverride::familyAt(int n) {
+	const Slot& s = order.get(n);
+	ArrayList<sp<IndexOverrideFamilyBase>>* family = families.getPtr(s.key);
+	return family->get(s.id).mut();
+}
+
+const IndexOverrideFamilyBase& StateOverride::familyAt(int n) const {
+	const Slot& s = order.get(n);
+	const ArrayList<sp<IndexOverrideFamilyBase>>* family = families.getPtr(s.key);
+	return *family->get(s.id);
+}

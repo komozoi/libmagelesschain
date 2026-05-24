@@ -22,14 +22,18 @@
 #include "testutil/TestChainDesign.h"
 
 /*
- * Lightweight interface contract tests for BlockchainIndex.  In Phase 1
- * the segment-lifecycle methods are not yet driven by the library, but
- * implementations must still satisfy the contract: encodingVersion() is
- * stable, and the segment hooks are at least callable without crashing.
+ * Lightweight interface contract tests for BlockchainIndex.
  *
- * Once the storage layer lands (Phase 2+) these will be expanded into
- * round-trip and merge correctness tests; for now they exist as a known-
- * good seed so the orchestration code has something to call.
+ * BlockchainIndex is now a query handle: it does not hold any segment
+ * payloads of its own, never has segments fed into it, and never produces
+ * one out of thin air.  Instead, at query time it asks its attached
+ * Catalog which segments cover the block range of interest and mmaps just
+ * those payloads through its attached IndexContainerManager.
+ *
+ * These tests only pin the bare-bones contract: encodingVersion() is
+ * stable, attach() stores its arguments, and mergeSegments() with no
+ * inputs returns an empty payload.  Full segment-orchestration behavior
+ * is exercised end to end in test_SegmentOrchestration.cpp.
  */
 
 TEST(BlockchainIndexTest, EncodingVersionIsStable) {
@@ -37,25 +41,17 @@ TEST(BlockchainIndexTest, EncodingVersionIsStable) {
 	EXPECT_EQ(idx.encodingVersion(), idx.encodingVersion());
 }
 
-TEST(BlockchainIndexTest, WriteAndReadSegmentSucceedsWithMatchingVersion) {
+TEST(BlockchainIndexTest, AttachStoresStorageHandles) {
 	TestSumIndex idx;
-	Bytestring payload = idx.writeSegment(0, 9);
-	// readSegment with the same encoding version this index reports must
-	// not reject the segment.
-	EXPECT_TRUE(idx.readSegment(payload, idx.encodingVersion(), 0, 9));
+	// Without storage attached, latestSum() must be a benign zero rather
+	// than crashing (no segments, nothing to read).
+	EXPECT_EQ(idx.latestSum(), 0);
+	EXPECT_EQ(idx.latestCount(), 0);
 }
 
-TEST(BlockchainIndexTest, MergeSegmentsCallable) {
+TEST(BlockchainIndexTest, MergeSegmentsWithNoInputsReturnsEmpty) {
 	TestSumIndex idx;
-	ArrayList<Bytestring> payloads;
-	payloads.add(idx.writeSegment(0, 4));
-	payloads.add(idx.writeSegment(5, 9));
-	ArrayList<uint16_t> versions;
-	versions.add(idx.encodingVersion());
-	versions.add(idx.encodingVersion());
-	// Phase 1 returns an empty Bytestring placeholder; we just want to
-	// ensure the contract is callable end to end.
-	Bytestring merged = idx.mergeSegments(payloads, versions);
-	(void)merged;
-	SUCCEED();
+	ArrayList<SegmentLocator> empty;
+	Bytestring merged = idx.mergeSegments(empty);
+	EXPECT_EQ((int)merged.size(), 0);
 }

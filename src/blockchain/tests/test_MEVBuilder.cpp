@@ -134,7 +134,7 @@ TEST_F(MEVBuilderTest, StartsFromBackendNotFrontendState) {
 	// Independently mutate a separate override; the builder should not
 	// see this when scoring transactions.
 	sp<StateOverride> stray = backend.newStateOverride();
-	stray.mut().override<TestSumOverrideFamily>(0).count = 100;
+	stray.mut().override<TestSumOverrideFamily>(0).countDelta = 100;
 
 	ArrayList<sp<Transaction>> mempool;
 	mempool.add(sp<TestTransaction>::create(0, 3));  // id=3: 15 if count==0 else 1

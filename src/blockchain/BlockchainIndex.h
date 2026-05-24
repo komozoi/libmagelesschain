@@ -22,55 +22,95 @@
 #include <cstdint>
 #include "ds/Bytestring.h"
 #include "ds/ArrayList.h"
+#include "storage/SegmentLocator.h"
+
+class Catalog;
+class IndexContainerManager;
 
 /*
  * Base interface for an application-defined blockchain index.
  *
- * Indexes own the semantics of how chain state is materialized on disk and
- * how it is queried.  Every index in this library is segment-based: state
- * is written out as discrete segments, each covering a contiguous block
- * range, and the library orchestrates segment storage (locations,
- * containers, catalog entries, checksums).  The encoding of each segment's
- * payload and the meaning of the data it holds are entirely application
- * defined.
+ * An index it is a lightweight query handle that, at query time, asks the
+ * Catalog which segments cover the block range of interest and mmaps just
+ * those payloads through the IndexContainerManager.  This keeps the
+ * working set bounded regardless of chain size: most queries only need a
+ * fragment of one or two segments.
  *
- * The Phase 1 refactor introduces the interface only; the orchestration
- * that actually drives writeSegment/readSegment/mergeSegments is not yet
- * wired up.  Subclasses can implement these as TODOs until the storage
- * layer lands.
+ * Lifecycle:
+ *   1. The application constructs the index and hands it to the
+ *      BackendRegistry via ChainDesign::registerIndexes.
+ *   2. The backend immediately calls attach(), giving the index access to
+ *      the catalog, the container manager, and its own
+ *      (persistentTypeId, instanceId) coordinates.  The index stores
+ *      these and uses them for every subsequent query.
+ *   3. At block commit time the backend asks the matching override family
+ *      to seal() a payload, writes that payload through the container,
+ *      and inserts a catalog entry.  The index does not need to "see"
+ *      this happen: its next query will discover the new segment via the
+ *      catalog.
+ *   4. When the catalog reports too many segments, the backend calls
+ *      mergeSegments() with the locators it picked for compaction.  The
+ *      index returns the merged payload as a single Bytestring; the
+ *      backend writes it, catalogs it, and deletes the inputs.
+ *
+ * Indexes own their queries and decide which
+ * segments are relevant for each one.
+ * Compacted-away segments are deleted from the catalog and their disk
+ * regions are returned to the FreeSpaceFile.  An old segment is not
+ * outdated by virtue of being older; it still authoritatively covers its
+ * block range and is part of the index.
  */
 class BlockchainIndex {
 public:
 	/*
-	 * Returns the segment encoding version.  When the library reads back an
-	 * older segment that this index cannot decode, the affected block range
-	 * is rebuilt from the journal.
+	 * Returns the segment encoding version this index currently emits.
+	 * The library stamps each new segment with this version.  When the
+	 * index reads back a segment whose recorded version it cannot decode
+	 * it should reject the read; the backend may rebuild that block range
+	 * from the journal in the future.
 	 */
 	virtual uint16_t encodingVersion() const = 0;
 
 	/*
-	 * Encode the index's state for [blockRangeStart, blockRangeEnd] as a
-	 * payload byte string.  The library writes this verbatim, prefixed with
-	 * its own framing.
+	 * Called once during backend construction to wire the index up to its
+	 * storage.  After this returns the index can mmap any of its own
+	 * segments via the catalog + container manager.  The default stores
+	 * the parameters as members; subclasses that need additional setup
+	 * (caches, etc.) may override and call this base implementation
+	 * first.
 	 */
-	virtual Bytestring writeSegment(uint64_t blockRangeStart, uint64_t blockRangeEnd) const = 0;
+	virtual void attach(Catalog* catalog, IndexContainerManager* containers,
+		uint16_t persistentTypeId, uint8_t instanceId) {
+		this->attachedCatalog = catalog;
+		this->attachedContainers = containers;
+		this->attachedPersistentTypeId = persistentTypeId;
+		this->attachedInstanceId = instanceId;
+	}
 
 	/*
-	 * Decode a previously written segment payload back into in-memory state.
-	 * If the encoding version recorded in the catalog is one this index
-	 * cannot decode, return false so the library can mark the block range
-	 * for rebuild from the journal.
+	 * Merge several existing segments into one.  Inputs are passed as
+	 * catalog locators (ascending block range, then merge generation).
+	 * The index mmaps each input via its attached container, computes the
+	 * combined payload covering the union of all input block ranges, and
+	 * returns the new payload as a Bytestring.  The backend writes that
+	 * payload as a new segment, catalogs it at one merge generation above
+	 * the highest input, and deletes the inputs (catalog entries + disk
+	 * regions).  Returning an empty Bytestring aborts the merge.
 	 */
-	virtual bool readSegment(const Bytestring& payload, uint16_t encodingVersionOnDisk, uint64_t blockRangeStart, uint64_t blockRangeEnd) = 0;
-
-	/*
-	 * Merge several segments into one.  The library picks which segments to
-	 * merge based on size and count thresholds, hands the payloads to this
-	 * method, and gets back the merged payload to write as a new segment.
-	 */
-	virtual Bytestring mergeSegments(const ArrayList<Bytestring>& payloads, const ArrayList<uint16_t>& encodingVersionsOnDisk) const = 0;
+	virtual Bytestring mergeSegments(const ArrayList<SegmentLocator>& inputs) const = 0;
 
 	virtual ~BlockchainIndex() = default;
+
+protected:
+	/*
+	 * Storage handles wired in by the backend.  Subclasses read these in
+	 * their query methods to range-scan the catalog and mmap the relevant
+	 * segment payloads.
+	 */
+	Catalog* attachedCatalog = nullptr;
+	IndexContainerManager* attachedContainers = nullptr;
+	uint16_t attachedPersistentTypeId = 0;
+	uint8_t attachedInstanceId = 0;
 };
 
 #endif //LIBMAGELESSCHAIN_BLOCKCHAININDEX_H

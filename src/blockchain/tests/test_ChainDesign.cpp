@@ -56,7 +56,7 @@ TEST_F(ChainDesignTest, BackendExposesRegisteredIndex) {
 	BlockchainBackend backend(logger, testDir, design);
 	sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
 	ASSERT_NE(idx.get(), nullptr);
-	EXPECT_EQ(idx->sum, 0);
+	EXPECT_EQ(idx->latestSum(), 0);
 }
 
 TEST_F(ChainDesignTest, BackendStateOverrideHasRegisteredFamily) {
@@ -64,8 +64,8 @@ TEST_F(ChainDesignTest, BackendStateOverrideHasRegisteredFamily) {
 	BlockchainBackend backend(logger, testDir, design);
 	sp<StateOverride> state = backend.newStateOverride();
 	ASSERT_NE(state.get(), nullptr);
-	EXPECT_EQ(state->override<TestSumOverrideFamily>(0).sum, 0);
-	EXPECT_EQ(state->override<TestSumOverrideFamily>(0).count, 0);
+	EXPECT_EQ(state->override<TestSumOverrideFamily>(0).sum(), 0);
+	EXPECT_EQ(state->override<TestSumOverrideFamily>(0).count(), 0);
 }
 
 TEST_F(ChainDesignTest, TransactionTypeIsRegistered) {

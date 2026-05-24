@@ -32,32 +32,44 @@
 /*
  * Simple "global sum" index used by the test suite.
  *
- * Conceptually this is the committed materialized state for the sum-state
- * test chain.  Phase 1 storage is in-memory; once segment storage lands the
- * sum will be persisted via BlockchainIndex::writeSegment.
+ * The committed state is stored entirely on disk as a sequence of
+ * absolute-state segments (one segment per block that recorded changes).
+ * latestSum() / latestCount() query the catalog for the most recent
+ * segment via the attached storage and mmap its 8-byte payload.  No
+ * cached in-RAM state.
  */
 class TestSumIndex : public BlockchainIndex {
 public:
-	int sum = 0;
-	int count = 0;
+	uint16_t encodingVersion() const override { return 1; }
+	Bytestring mergeSegments(const ArrayList<SegmentLocator>& inputs) const override;
 
-	uint16_t encodingVersion() const override { return 0; }
-	Bytestring writeSegment(uint64_t, uint64_t) const override { return Bytestring(); }
-	bool readSegment(const Bytestring&, uint16_t, uint64_t, uint64_t) override { return true; }
-	Bytestring mergeSegments(const ArrayList<Bytestring>&, const ArrayList<uint16_t>&) const override {
-		return Bytestring();
-	}
+	int latestSum() const;
+	int latestCount() const;
 };
 
 /*
- * Override family paired with TestSumIndex.  Stores the pending sum/count
- * delta accumulated by transactions in the block-in-progress.  Must be
- * copy-constructible so MEVBuilder candidate forking via sp<T> CoW works.
+ * Override family paired with TestSumIndex.  Holds the pending delta to
+ * apply on top of the committed sum/count.  attach() wires up a pointer
+ * to the matching TestSumIndex so reads through to committed state are
+ * cheap (one catalog scan + one mmap per query).
+ *
+ * Must be copy-constructible so MEVBuilder candidate forking via sp<T>
+ * CoW works.
  */
 class TestSumOverrideFamily : public IndexOverrideFamilyBase {
 public:
-	int sum = 0;
-	int count = 0;
+	int sumDelta = 0;
+	int countDelta = 0;
+	bool dirty = false;
+	TestSumIndex* index = nullptr;
+
+	void attach(BlockchainIndex& idx) override { index = (TestSumIndex*)&idx; }
+
+	/* Read-through accessors: committed state + pending delta. */
+	int sum() const { return (index ? index->latestSum() : 0) + sumDelta; }
+	int count() const { return (index ? index->latestCount() : 0) + countDelta; }
+
+	Bytestring seal() const override;
 };
 
 /*

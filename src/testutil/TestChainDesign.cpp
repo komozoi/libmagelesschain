@@ -20,6 +20,98 @@
 #include "TestChainDesign.h"
 #include "universaltime.h"
 
+#include "storage/Catalog.h"
+#include "storage/IndexContainer.h"
+#include "storage/IndexContainerManager.h"
+
+#include <cstring>
+
+/*
+ * latestSum/latestCount: ask the catalog for every segment covering this
+ * index instance, take the one with the highest blockRangeEnd (last
+ * mergeGeneration wins on tie), mmap its 8-byte payload, and decode.  No
+ * RAM-side caching: each query touches the catalog + one mmap.
+ */
+static bool readLatestSegment(const BlockchainIndex& self, Catalog* cat, IndexContainerManager* mgr,
+		uint16_t typeId, uint8_t instanceId, int& outSum, int& outCount) {
+	outSum = 0;
+	outCount = 0;
+	if (!cat || !mgr) return false;
+
+	ArrayList<SegmentLocator> segs = cat->getAllSegments(typeId, instanceId);
+	if (segs.size() == 0) return false;
+
+	// Entries are sorted ascending by (blockStart, mergeGeneration).  We
+	// want the latest committed state, i.e. the segment whose
+	// blockRangeEnd is largest; on tie the highest mergeGeneration wins.
+	int pickIdx = 0;
+	for (int i = 1; i < segs.size(); ++i) {
+		const SegmentLocator& a = segs.get(pickIdx);
+		const SegmentLocator& b = segs.get(i);
+		if (b.blockRangeEnd > a.blockRangeEnd
+			|| (b.blockRangeEnd == a.blockRangeEnd && b.mergeGeneration > a.mergeGeneration)) {
+			pickIdx = i;
+		}
+	}
+	const SegmentLocator& pick = segs.get(pickIdx);
+	if (pick.encodingVersion != self.encodingVersion()) return false;
+	if (pick.byteLength < 8) return false;
+
+	IndexContainer* container = mgr->get(pick.persistentTypeId, pick.instanceId, pick.containerId);
+	IndexContainer::PayloadView view = container->mmapPayload(pick.byteOffset, pick.byteLength);
+	if (!view.data) return false;
+	std::memcpy(&outSum, view.data, 4);
+	std::memcpy(&outCount, view.data + 4, 4);
+	return true;
+}
+
+int TestSumIndex::latestSum() const {
+	int sum = 0, count = 0;
+	readLatestSegment(*this, attachedCatalog, attachedContainers, attachedPersistentTypeId, attachedInstanceId, sum, count);
+	return sum;
+}
+
+int TestSumIndex::latestCount() const {
+	int sum = 0, count = 0;
+	readLatestSegment(*this, attachedCatalog, attachedContainers, attachedPersistentTypeId, attachedInstanceId, sum, count);
+	return count;
+}
+
+Bytestring TestSumIndex::mergeSegments(const ArrayList<SegmentLocator>& inputs) const {
+	// Absolute-state segments: the input with the highest blockRangeEnd
+	// already represents the union of all the input block ranges, so we
+	// just hand its payload back as the merged payload.  Indexes whose
+	// payloads are deltas would actually combine them here.
+	if (inputs.size() == 0) return Bytestring();
+	if (!attachedContainers) return Bytestring();
+
+	int pickIdx = 0;
+	for (int i = 1; i < inputs.size(); ++i) {
+		const SegmentLocator& a = inputs.get(pickIdx);
+		const SegmentLocator& b = inputs.get(i);
+		if (b.blockRangeEnd > a.blockRangeEnd
+			|| (b.blockRangeEnd == a.blockRangeEnd && b.mergeGeneration > a.mergeGeneration)) {
+			pickIdx = i;
+		}
+	}
+	const SegmentLocator& pick = inputs.get(pickIdx);
+	IndexContainer* container = attachedContainers->get(pick.persistentTypeId, pick.instanceId, pick.containerId);
+	IndexContainer::PayloadView view = container->mmapPayload(pick.byteOffset, pick.byteLength);
+	if (!view.data) return Bytestring();
+	return Bytestring((void*)view.data, (size_t)view.length);
+}
+
+Bytestring TestSumOverrideFamily::seal() const {
+	if (!dirty) return Bytestring();
+	// Absolute new state = committed + pending delta.
+	int absSum = (index ? index->latestSum() : 0) + sumDelta;
+	int absCount = (index ? index->latestCount() : 0) + countDelta;
+	uint8_t buf[8];
+	std::memcpy(buf, &absSum, 4);
+	std::memcpy(buf + 4, &absCount, 4);
+	return Bytestring((void*)buf, 8);
+}
+
 TestTransaction::TestTransaction(int val, int id)
 	: value(val), timestamp(millis_since_epoch()), id(id) {}
 
@@ -29,21 +121,23 @@ bool TestTransaction::verify(const StateOverride&) const {
 
 bool TestTransaction::apply(StateOverride& state) const {
 	TestSumOverrideFamily& fam = state.override<TestSumOverrideFamily>(0);
-	fam.sum += value;
-	fam.count++;
+	fam.sumDelta += value;
+	fam.countDelta++;
+	fam.dirty = true;
 	return true;
 }
 
 float TestTransaction::computeValue(const StateOverride& state) const {
 	const TestSumOverrideFamily& fam = state.override<TestSumOverrideFamily>(0);
+	int curCount = fam.count();
 	if (id == 2) {
-		return (fam.count > 0) ? 20.0f : 5.0f;
+		return (curCount > 0) ? 20.0f : 5.0f;
 	}
 	if (id == 1) {
 		return 10.0f;
 	}
 	if (id == 3) {
-		return (fam.count == 0) ? 15.0f : 1.0f;
+		return (curCount == 0) ? 15.0f : 1.0f;
 	}
 	return (float)value;
 }

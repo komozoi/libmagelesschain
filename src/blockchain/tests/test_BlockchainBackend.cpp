@@ -114,7 +114,7 @@ TEST_F(BlockchainBackendTest, Persistence) {
 		BlockchainBackend backend(logger, testDir, makeDesign());
 		EXPECT_EQ(backend.getBlockHeight(), 1);
 		sp<StateOverride> state = backend.newStateOverride();
-		EXPECT_EQ(state->override<TestSumOverrideFamily>(0).sum, 42);
+		EXPECT_EQ(state->override<TestSumOverrideFamily>(0).sum(), 42);
 		ArrayList<sp<Transaction>> retrievedTxs = backend.getBlock(0);
 		EXPECT_EQ(retrievedTxs.size(), 1);
 		EXPECT_EQ(((const TestTransaction&)*retrievedTxs.get(0)).value, 42);
@@ -191,14 +191,14 @@ TEST_F(BlockchainBackendTest, NewStateOverrideIsFreshAndIsolated) {
 	backend.addBlock(txs);
 
 	sp<StateOverride> a = backend.newStateOverride();
-	int aBefore = a->override<TestSumOverrideFamily>(0).sum;
+	int aBefore = a->override<TestSumOverrideFamily>(0).sum();
 
-	// Mutate a; do not modify backend.
-	a.mut().override<TestSumOverrideFamily>(0).sum = 999;
+	// Mutate a's pending delta; do not modify backend.
+	a.mut().override<TestSumOverrideFamily>(0).sumDelta = 999;
 
 	sp<StateOverride> b = backend.newStateOverride();
-	EXPECT_EQ(b->override<TestSumOverrideFamily>(0).sum, aBefore);
-	EXPECT_NE(b->override<TestSumOverrideFamily>(0).sum, 999);
+	EXPECT_EQ(b->override<TestSumOverrideFamily>(0).sum(), aBefore);
+	EXPECT_NE(b->override<TestSumOverrideFamily>(0).sum(), aBefore + 999);
 }
 
 TEST_F(BlockchainBackendTest, MultipleBlocksInOneEpoch) {

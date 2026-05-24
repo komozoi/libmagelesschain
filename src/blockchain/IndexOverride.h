@@ -23,7 +23,7 @@
 
 #include "ds/Bytestring.h"
 
-class Index;
+class BlockchainIndex;
 
 /*
  * Base for an application-defined family of index overrides.
@@ -35,11 +35,12 @@ class Index;
  *
  * Each concrete override family is a sibling of a concrete Index type and
  * knows how to:
- *   - read through to the underlying Index for committed values,
+ *   - read through to the underlying Index for committed values (the
+ *     family typically caches a pointer to its index, wired by attach()),
  *   - layer in any pending changes made by transactions in the current
  *     block-in-progress (or the speculative mempool view in the frontend),
  *   - produce a segment payload at seal-time, which is what the backend
- *     writes through the matching BlockchainIndex when the block commits.
+ *     writes through the container manager when the block commits.
  *
  * Copy semantics:
  *   Concrete override families must be copy-constructible so that sp<T>'s
@@ -53,14 +54,21 @@ public:
 
 	/*
 	 * Encode the override's pending changes as a segment payload.  The
-	 * backend will hand this to the matching BlockchainIndex at commit time.
-	 * Returning an empty Bytestring signals "no changes for this index in
-	 * this block" and the catalog entry is skipped.
-	 *
-	 * In Phase 1 this is allowed to return an empty Bytestring as a
-	 * placeholder while segment storage is still being wired up.
+	 * backend writes the returned bytes through the matching index's
+	 * container and inserts a catalog entry for them.  Returning an
+	 * empty Bytestring signals "no changes for this index in this block";
+	 * no segment is written.
 	 */
 	virtual Bytestring seal() const { return Bytestring(); }
+
+	/*
+	 * Called by the backend whenever a fresh StateOverride is
+	 * materialized (newStateOverride / commit / fork root) so the family
+	 * can wire itself up to the index it reads through to.  Default does
+	 * nothing.  Application override families typically cast the
+	 * argument to their own concrete index type and store a pointer.
+	 */
+	virtual void attach(BlockchainIndex& /*index*/) {}
 };
 
 #endif //LIBMAGELESSCHAIN_INDEXOVERRIDE_H

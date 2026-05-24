@@ -24,6 +24,7 @@
 #include "IndexFamily.h"
 
 #include "alloc/pointer.h"
+#include "ds/ArrayList.h"
 #include "ds/HashMap.h"
 
 /*
@@ -40,20 +41,40 @@
  */
 class BackendRegistry {
 public:
+	/*
+	 * Ordered registration record.  Each call to registerIndex() appends
+	 * one Entry.  The index of the entry inside `entries` is the
+	 * `persistentTypeId` recorded in the on-disk catalog: it survives across
+	 * restarts as long as the application's ChainDesign registers indexes
+	 * in the same order (the same contract that already backs
+	 * backend.index<T>(id)).
+	 */
+	struct Entry {
+		TypeKey key;
+		uint8_t id;
+	};
+
 	BackendRegistry() : families(16) {}
 
 	template<typename T>
 	void registerIndex(sp<T> instance) {
 		TypeKey key = typeKey<T>();
+		uint8_t newId;
 		sp<IndexFamilyBase>* existingPtr = families.getPtr(key);
 		if (!existingPtr) {
 			sp<IndexFamily<T>> fam = sp<IndexFamily<T>>::create();
 			fam.mut().add(std::move(instance));
 			families.put(key, sp<IndexFamilyBase>(std::move(fam)));
+			newId = 0;
 		} else {
 			IndexFamily<T>& fam = (IndexFamily<T>&)existingPtr->mut();
+			newId = (uint8_t)fam.instanceCount();
 			fam.add(std::move(instance));
 		}
+		Entry e;
+		e.key = key;
+		e.id = newId;
+		entries.add(e);
 	}
 
 	template<typename T>
@@ -73,8 +94,25 @@ public:
 		return (*famPtr)->instanceCount();
 	}
 
+	/*
+	 * Type-erased accessor used by the backend's commit and load paths to
+	 * walk all registered indexes in registration order.  Application code
+	 * should not call this; use the typed backend.index<T>(id) instead.
+	 */
+	sp<BlockchainIndex> getIndexAt(uint16_t persistentTypeId) const {
+		if ((int)persistentTypeId >= entries.size()) return sp<BlockchainIndex>();
+		const Entry& e = entries.get(persistentTypeId);
+		const sp<IndexFamilyBase>* famPtr = families.getPtr(e.key);
+		if (!famPtr) return sp<BlockchainIndex>();
+		return (*famPtr)->getInstance(e.id);
+	}
+
+	const ArrayList<Entry>& getEntries() const { return entries; }
+
 private:
 	HashMap<TypeKey, sp<IndexFamilyBase>> families;
+	// Preserves registration order; index here == persistentTypeId.
+	ArrayList<Entry> entries;
 };
 
 #endif //LIBMAGELESSCHAIN_BACKENDREGISTRY_H
