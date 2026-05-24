@@ -32,13 +32,18 @@ BlockchainBackend backend(logger, "/data/mychain", design);
 
 During construction the backend:
 
-1. Opens (and creates if needed) the metadata file and the epoch journal.
+1. Opens (and creates if needed) the metadata file and the epoch journal
+   under `dataDir/epochs/`.
 2. Calls `design->registerIndexes(BackendRegistry&)`.
 3. Calls `design->registerOverrides(StateOverrideRegistry&)`.
 4. Calls `design->registerTransactionTypes(TransactionTypeRegistry&)`.
-5. **(Phase 1 stopgap)** Replays the journal into an internal
-   `committedInterim: sp<StateOverride>`, which is what
-   `newStateOverride()` deep-copies.
+5. Opens the `Catalog` at `dataDir/catalog/` and the
+   `IndexContainerManager` at `dataDir/indexes/`.
+6. Calls `BlockchainIndex::attach(catalog, containerManager,
+   persistentTypeId, instanceId)` on every registered index instance so
+   it can range-scan the catalog and mmap its own segments at query
+   time. No segment payloads are read at startup and no transactions are
+   replayed.
 
 The backend is non-copyable and non-movable. The `sp<ChainDesign>` is held
 for the backend's lifetime.
@@ -66,11 +71,14 @@ const StateOverrideRegistry&   getStateOverrideRegistry()   const;
 #### `addBlock`
 
 Writes the block (header + transactions) to the durable journal, updates
-the metadata header, applies each transaction to `committedInterim`, and
-returns the new block height. Returns `-1` if called before the
-`targetBlockTimeMs` minimum has elapsed since the last commit. Block
-numbers are 0-based; block *height* is the count of committed blocks. The
-first block is block `0` and after committing it the height is `1`.
+the metadata header, asks each registered override family to seal its
+pending changes into a segment payload, writes those payloads through
+`IndexContainerManager`, and inserts a `SegmentLocator` for each one
+into the `Catalog`. Returns the new block height, or `-1` if called
+before the `targetBlockTimeMs` minimum has elapsed since the last
+commit. Block numbers are 0-based; block *height* is the count of
+committed blocks. The first block is block `0` and after committing it
+the height is `1`.
 
 #### `getBlock` / `getTransactionsByTimeWindow`
 
@@ -80,10 +88,12 @@ union of committed blocks whose block timestamp falls in `[start, end]`.
 
 #### `newStateOverride`
 
-Returns a freshly forked `sp<StateOverride>` that the caller may freely
-mutate without affecting the backend's internal state. In Phase 1 this is
-a deep copy of `committedInterim`; in **(Phase 2+)** it will be an empty
-override that reads through committed segment-backed indexes.
+Returns a fresh empty `sp<StateOverride>` populated with one override
+family per registered slot (via `StateOverrideRegistry`). The caller may
+freely mutate it without affecting the backend's internal state. Reads
+through the override fall through to the committed indexes via the
+catalog + container manager, so callers always see a consistent
+"committed state plus pending edits" view.
 
 #### `index<T>(id)`
 
@@ -96,11 +106,28 @@ instance of type `T` with that `id` was registered by `ChainDesign`.
   (block height, last block time, etc).
 - `openEpochs`: `HashMap<uint32_t, sp<MmapHandle>>` caching open epoch
   files indexed by epoch id.
-- `committedInterim`: stopgap `sp<StateOverride>` reconstructed from the
-  journal at startup; will be removed when indexes go segment-backed.
+- `catalog`: `sp<Catalog>` recording every segment's metadata under
+  `dataDir/catalog/`.
+- `containerManager`: `sp<IndexContainerManager>` owning the per-index
+  payload files under `dataDir/indexes/`.
 
-The backend never spawns threads. All persistent threading is owned by the
-frontend.
+The backend never spawns threads. Threshold-driven compaction runs
+inline inside `addBlock` and the merge order is deterministic (smallest
+two segments under the configured size threshold).
+Application-level persistent threading lives in the frontend.
+
+### On-disk layout
+
+```
+dataDir/
+    metadata.bin
+    epochs/    *.bin   journal, fsync'd, source of truth
+    catalog/   catalog.bin   not fsync'd
+    indexes/   <type>-<instance>-<container>.bin   not fsync'd
+```
+
+Only the journal is `fsync`'d. Anything under `catalog/` or `indexes/`
+can be rebuilt from the journal if it is corrupted on restart.
 
 ## BlockchainFrontend
 
@@ -208,5 +235,5 @@ reconstruct each transaction.
 | `BlockchainStateSnapshot` (cumulative in-RAM state) | Removed. State lives in indexes; pending state lives in `StateOverride`.                     |
 | `getLatestState()`                                  | `newStateOverride()` returns a fresh override for callers to fork.                           |
 | Global static transaction type registry             | Per-backend `TransactionTypeRegistry`, populated by `ChainDesign::registerTransactionTypes`. |
-| Reapplied transaction history on startup            | Stopgap journal replay into `committedInterim`; goes away when indexes are segment-backed.   |
+| Reapplied transaction history on startup            | Removed. Indexes attach to the catalog and read segments lazily at query time.               |
 | Frontend touching multiple files                    | Only `mempool.bin`.                                                                          |

@@ -17,13 +17,23 @@ class BlockchainIndex {
 public:
     virtual ~BlockchainIndex() = default;
     virtual uint16_t encodingVersion() const = 0;
-    virtual Bytestring writeSegment(uint64_t blockRangeStart, uint64_t blockRangeEnd) const = 0;
-    virtual bool readSegment(const Bytestring& payload, uint16_t encodingVersionOnDisk,
-                              uint64_t blockRangeStart, uint64_t blockRangeEnd) = 0;
-    virtual Bytestring mergeSegments(const ArrayList<Bytestring>& payloads,
-                                      const ArrayList<uint16_t>& encodingVersionsOnDisk) const = 0;
+    virtual void attach(Catalog* catalog, IndexContainerManager* containers,
+                        uint16_t persistentTypeId, uint8_t instanceId);
+    virtual Bytestring mergeSegments(const ArrayList<SegmentLocator>& inputs) const = 0;
 };
 ```
+
+An index is a lightweight query handle. It does not hold committed
+state in RAM. At query time it asks the attached `Catalog` which
+segments cover the block range of interest and mmaps the matching
+payloads through the attached `IndexContainerManager`. Most queries
+only touch a fragment of one or two segments, so the working set stays
+bounded regardless of chain size.
+
+Segment payload bytes are produced at commit time by the corresponding
+`IndexOverrideFamilyBase::seal()` (see
+[state-overrides.md](state-overrides.md)). The index itself never
+writes a payload directly; it only reads them back and merges them.
 
 ## Registering indexes
 
@@ -70,12 +80,12 @@ initialization-order hazards.
 The matching machinery for override families is `StateOverrideRegistry`
 (see [state overrides](state-overrides.md)).
 
-## Reads in Phase 1
+## Reads
 
 Indexes can be queried directly from the backend as soon as
 `registerIndexes` has populated them. There is no required read API on
-`Index` itself; what queries look like is part of the application's index
-implementation. Typical patterns:
+`BlockchainIndex` itself; what queries look like is part of the
+application's index implementation. Typical patterns:
 
 ```cpp
 backend.index<BalanceIndex>(0)->balanceOf(account, blockHeight);
@@ -83,52 +93,101 @@ backend.index<VectorIndex>(0)->nearest(queryVector, k, blockHeight);
 ```
 
 The library does not constrain method names, return types, or block-height
-semantics. In Phase 2+ the catalog will let indexes filter by block-range,
-but applications are free to surface block-height-aware reads today.
+semantics.
 
-## Writes in Phase 1
+## Writes: the segment lifecycle
 
-In the final design, an index never writes itself directly. Instead, at
-block commit time the backend asks each registered override family to
-`seal()` its pending changes into a `Bytestring`, then hands those bytes
-to the matching index as a new segment.
+An index never writes a segment directly. At block commit time the
+backend:
 
-In Phase 1 there is no segment-storage layer yet, so writes are stored in
-whatever in-memory or ad-hoc structure the override family chooses, and
-committed by the override family's own internal state being preserved
-across block-commit boundaries.
+1. Asks each registered override family to `seal()` its pending changes
+   into a `Bytestring`.
+2. Writes that payload through `IndexContainerManager` to the matching
+   index's container file and records a `SegmentLocator` in the
+   `Catalog`.
+3. Opportunistically merges segments via `mergeSegments(inputs)` when
+   the segment count for an index exceeds
+   `BlockchainConfig::maxSegmentsPerIndex` and at least two candidates
+   are under `BlockchainConfig::maxMergeableSegmentBytes`. After a
+   successful merge the input segments are removed from the catalog and
+   their disk regions are freed back to the container's `FreeSpaceFile`.
 
-In practice the simplest Phase 1 index pairs a "delta" override family
-(which a transaction writes into via `s.override<...>(id)`) with a
-counterpart object that holds the committed-side data. The override
-family's `seal()` is a no-op for now.
+## Reading segments
 
-## What's reserved for Phase 2+
+Indexes mmap segments lazily through the catalog and container
+manager that were wired in by `attach()`. A typical query looks like:
 
-These are designed but not implemented:
+```cpp
+ArrayList<SegmentLocator> segs = attachedCatalog->rangeScan(
+    attachedPersistentTypeId, attachedInstanceId, fromBlock, toBlock);
+for (int i = 0; i < segs.size(); i++) {
+    const SegmentLocator& loc = segs.get(i);
+    IndexContainer* c = attachedContainers->get(
+        loc.persistentTypeId, loc.instanceId, loc.containerId);
+    IndexContainer::PayloadView view = c->mmapPayload(loc.byteOffset, loc.byteLength);
+    // interpret view.data[0 .. view.length) according to loc.encodingVersion
+}
+```
 
-- **Catalog**: per-catalog-file BTree of segments keyed by `(blockRangeStart,
-  blockRangeEnd)`, indexed by index type and instance id; top-level
-  table-of-contents BTree mapping block-range queries to catalog files; a
-  256-bit bloom-style bitmask per catalog file filtering by `(indexTypeKey,
-  instanceId)`.
-- **ContainerManager**: groups segments into shared physical containers
-  under a sub-2 GiB size threshold using `FreeSpaceFile` for intra-
-  container region management.
-- **Segment lifecycle orchestration**: the backend drives `writeSegment`,
-  `readSegment`, and `mergeSegments` on registered `BlockchainIndex`
-  subclasses; in Phase 1 these methods exist on the interface but are not
-  yet called by the library.
-- **Compaction policy**: smallest-first merges, threshold-triggered, run on
-  libexcessive's `ThreadPool`, never blocking the block builder.
-- **encodingVersion rejection**: if `encodingVersion()` does not match a
-  segment header, the affected block range is reindexed from the journal.
-  Indexes do not need to support every prior encoding.
-- **TimeIndex**: a library-provided `BlockchainIndex` for time-window
-  queries (mempool tail merged in by the frontend).
-- **Crash recovery**: indexes are not `fsync`'d. On a crash, any
-  index-degraded blocks are detected on startup and reindexed.
+Because `rangeScan` already returns segments in ascending
+`(blockRangeStart, mergeGeneration)` order, the index can fold delta
+segments forward or short-circuit on the first absolute snapshot it
+finds, depending on its encoding.
 
-When these land, `BlockchainIndex`'s existing segment lifecycle methods
-will start being called by the backend, but `BackendRegistry::registerIndex<T>`
-and `backend.index<T>(id)` will not change.
+## `mergeSegments`
+
+When the backend triggers a merge it hands the index a list of
+`SegmentLocator`s in ascending `(blockRangeStart, mergeGeneration)`
+order. The index is responsible for mmap'ing each input via its
+attached container manager, computing the combined payload covering
+the union of all input block ranges, and returning that as a single
+`Bytestring`. Returning an empty `Bytestring` aborts the merge.
+
+## Storage layout on disk
+
+A backend rooted at `dataDir/` lays out its files like this:
+
+```
+dataDir/
+    metadata.bin              chain height + last block timestamp
+    epochs/                   fsync'd transaction journal (source of truth)
+        0.bin
+        1.bin
+        ...
+    catalog/
+        catalog.bin           append-only log of SegmentLocator records
+                              (rewritten on remove)
+    indexes/
+        <type>-<instance>-<container>.bin   per-index segment containers
+```
+
+The catalog and the index containers are **not** `fsync`'d. The journal
+is the source of truth; if the catalog or any container is corrupted on
+restart, the affected block range can be reindexed from the journal.
+This trade keeps the commit fast path I/O-bound only on the journal.
+
+`IndexContainer` is backed by libexcessive's `FreeSpaceFile`, which
+lets compacted-away segment regions be reclaimed without rewriting the
+whole file. When compaction removes a segment from the catalog the
+backend calls `freeRegion(offset, length)` on the owning container so
+future segment writes can reuse the space.
+
+## Remaining work
+
+- **Table-of-contents + multi-file catalog**: the current catalog is a
+  single `catalog.bin` replayed into RAM as a sorted ArrayList; removes
+  rewrite the file. The concrete proposal calls for a top-level TOC
+  BTree pointing at per-block-range catalog files with a 256-bit
+  bloom-style bitmask per file. The public API (`Catalog::insert`,
+  `Catalog::remove`, `Catalog::rangeScan`) is shaped so the swap is
+  invisible to callers.
+- **TimeIndex**: a library-provided `BlockchainIndex` subclass for
+  time-window queries (with the frontend's mempool tail merged in). For
+  now `BlockchainBackend::getTransactionsByTimeWindow` still scans the
+  journal directly.
+- **Crash recovery / index-degraded blocks**: detect-and-reindex on
+  startup for individual block ranges whose container payloads fail
+  checksum.
+- **Parallel compaction**: today merges run inline on the commit thread.
+  Future work moves them onto libexcessive's `ThreadPool` so the
+  commit thread never blocks on a merge.
