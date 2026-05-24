@@ -17,129 +17,126 @@
  */
 
 #include <gtest/gtest.h>
+#include <filesystem>
+
 #include "blockchain/MEVBuilder.h"
 #include "blockchain/BlockchainBackend.h"
+#include "blockchain/StateOverride.h"
 #include "testutil/TestChainDesign.h"
 #include "universaltime.h"
-#include <filesystem>
+
 
 class MEVBuilderTest : public ::testing::Test {
 protected:
-    std::string testDir;
-    Logger logger;
+	std::string testDir;
+	Logger logger;
 
-    MEVBuilderTest() : logger("cmake-build-debug/test_logs", 0, 0) {}
+	MEVBuilderTest() : logger("cmake-build-debug/test_logs", 0, 0) {}
 
-    void SetUp() override {
-        uint64_t seconds = millis_since_epoch() / 1000;
-        testDir = "cmake-build-debug/test_data/" + std::to_string(seconds) + "-MEVBuilderTest";
-        std::filesystem::create_directories(testDir);
-    }
+	sp<ChainDesign> makeDesign() {
+		return sp<ChainDesign>(sp<TestChainDesign>::create());
+	}
 
-    void TearDown() override {
-        if (std::filesystem::exists(testDir)) {
-            std::filesystem::remove_all(testDir);
-        }
-    }
+	void SetUp() override {
+		uint64_t seconds = millis_since_epoch() / 1000;
+		std::string testName = ::testing::UnitTest::GetInstance()->current_test_info()->name();
+		testDir = "cmake-build-debug/test_data/" + std::to_string(seconds) + "-" + testName;
+		std::filesystem::create_directories(testDir);
+	}
+
+	void TearDown() override {
+		if (std::filesystem::exists(testDir)) {
+			std::filesystem::remove_all(testDir);
+		}
+	}
 };
 
 TEST_F(MEVBuilderTest, BasicSelection) {
-    BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
-    MEVBuilder builder(backend);
-    sp<BlockchainStateSnapshot> initialState = backend.getLatestState();
+	BlockchainBackend backend(logger, testDir, makeDesign());
+	MEVBuilder builder(backend);
 
-    ArrayList<sp<Transaction>> mempool;
-    mempool.add(sp<TestTransaction>::create(1));
-    mempool.add(sp<TestTransaction>::create(5));
-    mempool.add(sp<TestTransaction>::create(3));
+	ArrayList<sp<Transaction>> mempool;
+	mempool.add(sp<TestTransaction>::create(1));
+	mempool.add(sp<TestTransaction>::create(5));
+	mempool.add(sp<TestTransaction>::create(3));
 
-    ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 2, 0);
+	ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 2, 0);
 
-    EXPECT_EQ(block.size(), 2);
-    EXPECT_EQ(block.get(0)->computeValue(initialState.mut()), 5.0f);
-    EXPECT_EQ(block.get(1)->computeValue(initialState.mut()), 3.0f);
-    EXPECT_EQ(mempool.size(), 1);
-    EXPECT_EQ(mempool.get(0)->computeValue(initialState.mut()), 1.0f);
+	EXPECT_EQ(block.size(), 2);
+	EXPECT_EQ(((TestTransaction&)*block.get(0)).value, 5);
+	EXPECT_EQ(((TestTransaction&)*block.get(1)).value, 3);
+	EXPECT_EQ(mempool.size(), 1);
+	EXPECT_EQ(((TestTransaction&)*mempool.get(0)).value, 1);
 }
 
 TEST_F(MEVBuilderTest, RespectMaxTransactions) {
-    BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
-    MEVBuilder builder(backend);
-    sp<BlockchainStateSnapshot> initialState = backend.getLatestState();
+	BlockchainBackend backend(logger, testDir, makeDesign());
+	MEVBuilder builder(backend);
 
-    ArrayList<sp<Transaction>> mempool;
-    for (int i = 0; i < 10; ++i) {
-        mempool.add(sp<TestTransaction>::create(i));
-    }
+	ArrayList<sp<Transaction>> mempool;
+	for (int i = 0; i < 10; ++i) {
+		mempool.add(sp<TestTransaction>::create(i));
+	}
 
-    ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 5, 0);
+	ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 5, 0);
 
-    EXPECT_EQ(block.size(), 5);
-    EXPECT_EQ(mempool.size(), 5);
-    EXPECT_EQ(block.get(0)->computeValue(initialState.mut()), 9.0f);
-    EXPECT_EQ(block.get(4)->computeValue(initialState.mut()), 5.0f);
+	EXPECT_EQ(block.size(), 5);
+	EXPECT_EQ(mempool.size(), 5);
+	EXPECT_EQ(((TestTransaction&)*block.get(0)).value, 9);
+	EXPECT_EQ(((TestTransaction&)*block.get(4)).value, 5);
 }
 
 TEST_F(MEVBuilderTest, EmptyMempool) {
-    BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
-    MEVBuilder builder(backend);
+	BlockchainBackend backend(logger, testDir, makeDesign());
+	MEVBuilder builder(backend);
 
-    ArrayList<sp<Transaction>> mempool;
-    ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 10, 0);
+	ArrayList<sp<Transaction>> mempool;
+	ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 10, 0);
 
-    EXPECT_EQ(block.size(), 0);
-    EXPECT_EQ(mempool.size(), 0);
+	EXPECT_EQ(block.size(), 0);
+	EXPECT_EQ(mempool.size(), 0);
 }
 
 TEST_F(MEVBuilderTest, ComplexExecutionOrderDependency) {
-    BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
-    MEVBuilder builder(backend);
+	BlockchainBackend backend(logger, testDir, makeDesign());
+	MEVBuilder builder(backend);
 
-    ArrayList<sp<Transaction>> mempool;
-    // Tx A: id=1, value 10
-    // Tx B: id=2, value 5 initially, 20 if count > 0
-    // Tx C: id=3, value 15 initially, 1 if count > 0
-    
-    mempool.add(sp<TestTransaction>::create(0, 1));
-    mempool.add(sp<TestTransaction>::create(0, 2));
-    mempool.add(sp<TestTransaction>::create(0, 3));
+	ArrayList<sp<Transaction>> mempool;
+	// Tx A: id=1, value 10
+	// Tx B: id=2, value 5 initially, 20 if count > 0
+	// Tx C: id=3, value 15 initially, 1 if count > 0
 
-    // Iterative logic with maxTransactions = 2:
-    // 1. Initially values: Tx 1=10, Tx 2=5, Tx 3=15. Pick Tx 3 (15).
-    // 2. count becomes 1.
-    // 3. Re-evaluate remaining: Tx 1=10, Tx 2=20.
-    // 4. Pick Tx 2 (20).
-    // Result block: [Tx 3, Tx 2]. Total value = 15 + 20 = 35.
-    
-    // Note: Simple sort on initial values would pick [Tx 3, Tx 1], total = 15 + 10 = 25.
-    
-    ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 2, 0);
-    EXPECT_EQ(block.size(), 2);
-    EXPECT_EQ(((TestTransaction&)*block.get(0)).id, 3);
-    EXPECT_EQ(((TestTransaction&)*block.get(1)).id, 2);
-    
-    // Verify remaining in mempool
-    EXPECT_EQ(mempool.size(), 1);
-    EXPECT_EQ(((TestTransaction&)*mempool.get(0)).id, 1);
+	mempool.add(sp<TestTransaction>::create(0, 1));
+	mempool.add(sp<TestTransaction>::create(0, 2));
+	mempool.add(sp<TestTransaction>::create(0, 3));
+
+	// Iterative logic with maxTransactions = 2:
+	// 1. Initial values: 1=10, 2=5, 3=15.  Pick id=3 (15).
+	// 2. count becomes 1.
+	// 3. Re-evaluate: 1=10, 2=20.  Pick id=2 (20).
+	ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 2, 0);
+	EXPECT_EQ(block.size(), 2);
+	EXPECT_EQ(((TestTransaction&)*block.get(0)).id, 3);
+	EXPECT_EQ(((TestTransaction&)*block.get(1)).id, 2);
+
+	// Verify remaining in mempool
+	EXPECT_EQ(mempool.size(), 1);
+	EXPECT_EQ(((TestTransaction&)*mempool.get(0)).id, 1);
 }
 
 TEST_F(MEVBuilderTest, ExecutionOrderDependency) {
-    BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
-    MEVBuilder builder(backend);
+	BlockchainBackend backend(logger, testDir, makeDesign());
+	MEVBuilder builder(backend);
 
-    ArrayList<sp<Transaction>> mempool;
-    mempool.add(sp<TestTransaction>::create(0, 2)); // Value 5 initially (id=2)
-    mempool.add(sp<TestTransaction>::create(0, 1)); // Value 10 initially (id=1)
+	ArrayList<sp<Transaction>> mempool;
+	mempool.add(sp<TestTransaction>::create(0, 2));
+	mempool.add(sp<TestTransaction>::create(0, 1));
 
-    // Iterative logic should:
-    // 1. Evaluate Tx 2 (val 5), Tx 1 (val 10). Pick Tx 1.
-    // 2. Apply Tx 1. count becomes 1.
-    // 3. Evaluate remaining Tx 2. Now val is 20!
-    // 4. Pick Tx 2.
-    // Result block: [Tx 1, Tx 2].
-    
-    ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 10, 0);
-    EXPECT_EQ(block.size(), 2);
-    EXPECT_EQ(((TestTransaction&)*block.get(0)).id, 1);
-    EXPECT_EQ(((TestTransaction&)*block.get(1)).id, 2);
+	// 1. id=2 (val 5), id=1 (val 10).  Pick id=1.
+	// 2. Apply id=1.  count becomes 1.
+	// 3. Re-evaluate id=2 -> now 20.  Pick id=2.
+	ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 10, 0);
+	EXPECT_EQ(block.size(), 2);
+	EXPECT_EQ(((TestTransaction&)*block.get(0)).id, 1);
+	EXPECT_EQ(((TestTransaction&)*block.get(1)).id, 2);
 }

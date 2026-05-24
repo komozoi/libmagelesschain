@@ -17,24 +17,26 @@
  */
 
 #include "MEVBuilder.h"
-#include <algorithm>
-#include "universaltime.h"
 #include "BlockchainBackend.h"
+#include "universaltime.h"
 
-MEVBuilder::MEVBuilder(BlockchainBackend& backend)
-	: backend(backend) {}
+MEVBuilder::MEVBuilder(BlockchainBackend& backend) : backend(backend) {}
 
 ArrayList<sp<Transaction>> MEVBuilder::buildBlock(ArrayList<sp<Transaction>>& mempool, uint16_t maxTransactions, uint64_t deadline) const {
 	if (mempool.size() == 0) return {};
 
-	sp<BlockchainStateSnapshot> state = backend.getLatestState();
+	// Fresh override representing committed state.  Forks of this for
+	// alternative candidate orderings would CoW per-family via sp<T>; the
+	// current implementation only explores one greedy order so it uses a
+	// single mutable override.
+	sp<StateOverride> simState = backend.newStateOverride();
 
 	ArrayList<sp<Transaction>> selected;
 	ArrayList<int> indicesToRemove;
 
-	while (selected.size() < maxTransactions && mempool.size() > 0) {
+	while (selected.size() < maxTransactions && indicesToRemove.size() < mempool.size()) {
 		sp<Transaction> bestTx;
-		float bestValue = -1.0e30f; // Very small
+		float bestValue = -1.0e30f;
 		int bestIdx = -1;
 
 		for (int i = 0; i < mempool.size(); ++i) {
@@ -44,7 +46,7 @@ ArrayList<sp<Transaction>> MEVBuilder::buildBlock(ArrayList<sp<Transaction>>& me
 			if (alreadySelected) continue;
 
 			sp<Transaction> tx = mempool.get(i);
-			float val = tx->computeValue(state.mut());
+			float val = tx->computeValue(*simState);
 			if (val > bestValue) {
 				bestValue = val;
 				bestTx = tx;
@@ -53,25 +55,40 @@ ArrayList<sp<Transaction>> MEVBuilder::buildBlock(ArrayList<sp<Transaction>>& me
 		}
 
 		if (bestTx && bestValue >= 0) {
-			bestTx->apply(state.mut());
+			bestTx->apply(simState.mut());
 			selected.add(bestTx);
 			indicesToRemove.add(bestIdx);
 		} else {
 			break;
 		}
 
-		if (millis_since_epoch() >= deadline && deadline != 0) break;
+		if (deadline != 0 && millis_since_epoch() >= deadline) break;
 	}
 
-	// While time remains and further optimization is possible, try to reorder or change transactions to improve the total value.
-	while (millis_since_epoch() < deadline) {
-		// TODO: Implement
+	// Optimization loop: try to improve the selected ordering until the
+	// deadline.  Placeholder; future versions can explore swaps/2-opt etc.
+	while (deadline != 0 && millis_since_epoch() < deadline) {
+		// TODO: explore swap and reordering improvements.
 		break;
 	}
 
-	// Remove selected transactions from the mempool.
-	// Sort indices in descending order to remove from back to front
-	std::sort(indicesToRemove.begin(), indicesToRemove.end(), std::greater<int>());
+	// Remove selected transactions from the mempool while preserving the
+	// relative order of the rest.  Selection-sort the indices descending so
+	// removing earlier targets doesn't shift the indices of later targets.
+	int n = indicesToRemove.size();
+	for (int i = 0; i < n - 1; ++i) {
+		int maxPos = i;
+		for (int j = i + 1; j < n; ++j) {
+			if (indicesToRemove.get(j) > indicesToRemove.get(maxPos)) {
+				maxPos = j;
+			}
+		}
+		if (maxPos != i) {
+			int tmp = indicesToRemove.get(i);
+			indicesToRemove.set(i, indicesToRemove.get(maxPos));
+			indicesToRemove.set(maxPos, tmp);
+		}
+	}
 	for (int idx : indicesToRemove) {
 		// Ordered remove
 		for (int i = idx; i < mempool.size() - 1; ++i) {

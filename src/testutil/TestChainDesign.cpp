@@ -20,44 +20,36 @@
 #include "TestChainDesign.h"
 #include "universaltime.h"
 
-TestState::TestState(BlockchainBackend& backend, long blockHeight)
-	: BlockchainStateSnapshot(backend, blockHeight) {}
-
 TestTransaction::TestTransaction(int val, int id)
 	: value(val), timestamp(millis_since_epoch()), id(id) {}
 
-bool TestTransaction::verify(BlockchainStateSnapshot&) const {
+bool TestTransaction::verify(const StateOverride&) const {
 	return true;
 }
 
-bool TestTransaction::apply(BlockchainStateSnapshot& snapshot) const {
-	TestState& s = (TestState&)snapshot;
-	s.sum += value;
-	s.count++;
+bool TestTransaction::apply(StateOverride& state) const {
+	TestSumOverrideFamily& fam = state.override<TestSumOverrideFamily>(0);
+	fam.sum += value;
+	fam.count++;
 	return true;
 }
 
-float TestTransaction::computeValue(BlockchainStateSnapshot& snapshot) const {
-	TestState& s = (TestState&)snapshot;
+float TestTransaction::computeValue(const StateOverride& state) const {
+	const TestSumOverrideFamily& fam = state.override<TestSumOverrideFamily>(0);
 	if (id == 2) {
-		return (s.count > 0) ? 20.0f : 5.0f;
+		return (fam.count > 0) ? 20.0f : 5.0f;
 	}
 	if (id == 1) {
 		return 10.0f;
 	}
 	if (id == 3) {
-		return (s.count == 0) ? 15.0f : 1.0f;
+		return (fam.count == 0) ? 15.0f : 1.0f;
 	}
 	return (float)value;
 }
 
-uint8_t TestTransaction::getTypeId() const {
-	return 1;
-}
-
-uint64_t TestTransaction::getTimestamp() const {
-	return timestamp;
-}
+uint8_t TestTransaction::getTypeId() const { return 1; }
+uint64_t TestTransaction::getTimestamp() const { return timestamp; }
 
 void TestTransaction::write(MmapHandle* dst) const {
 	dst->write(getTypeId());
@@ -80,4 +72,16 @@ sp<Transaction> TestTransaction::createFromMmap(MmapHandle* src) {
 	sp<TestTransaction> tx = sp<TestTransaction>::create(val, id);
 	tx.mut().timestamp = ts;
 	return tx;
+}
+
+void TestChainDesign::registerIndexes(BackendRegistry& registry) {
+	registry.registerIndex<TestSumIndex>(sp<TestSumIndex>::create());
+}
+
+void TestChainDesign::registerOverrides(StateOverrideRegistry& registry) {
+	registry.registerOverride<TestSumOverrideFamily>();
+}
+
+void TestChainDesign::registerTransactionTypes(TransactionTypeRegistry& registry) {
+	registry.registerType(1, &TestTransaction::createFromMmap);
 }

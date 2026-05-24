@@ -1,7 +1,6 @@
-
 /*
  * Copyright 2021-2026 komozoi
- * Original Creation Date: 2026-5-22
+ * Original Creation Date: 2026-5-24
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,10 +16,17 @@
  *
  */
 
-#include "BlockchainStateSnapshot.h"
+#include "TransactionTypeRegistry.h"
+#include "Transaction.h"
+#include "fs/FdHandle.h"
 
-#include "BlockchainBackend.h"
+#include <stdexcept>
 
-
-BlockchainStateSnapshot::BlockchainStateSnapshot(BlockchainBackend& backend, long blockHeight) : backend(backend), blockHeight(blockHeight) {
+sp<Transaction> TransactionTypeRegistry::read(MmapHandle* src) const {
+	uint8_t typeId;
+	if (src->read(typeId) != sizeof(uint8_t))
+		throw std::out_of_range("Failed to read transaction type");
+	FactoryFunc f = getFactory(typeId);
+	if (!f) return sp<Transaction>();
+	return f(src);
 }

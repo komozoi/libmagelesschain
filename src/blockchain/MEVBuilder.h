@@ -23,7 +23,7 @@
 #include <ds/ArrayList.h>
 
 #include "Transaction.h"
-#include "BlockchainStateSnapshot.h"
+#include "StateOverride.h"
 
 
 class BlockchainBackend;
@@ -32,34 +32,34 @@ class BlockchainBackend;
 /**
  * @class MEVBuilder
  *
- * @brief Builds blocks to maximize transaction success and "profit", where
- *        profit is defined by data completeness, conciseness, and other factors.
+ * @brief Builds blocks by exploring candidate orderings of mempool
+ *        transactions to maximize their total computed value.
  *
- * In traditional blockchains, MEV (Maximum Extractable Value) refers to the
- * practice of extracting value from transactions by strategically ordering
- * them within a block. In this case, value is flexibly defined by the transaction
- * subclass, so we can optimize for other metrics like success rate, priority, etc.
+ * Value is what the application optimizes for: transaction fees, ordering
+ * fairness, data completeness, success rate, anything Transaction::computeValue
+ * returns.  The builder treats it as an opaque float to maximize.
  *
- * This class provides logic to build blocks while optimizing for this "value"
- * defined by the subclass.
+ * Approach:
+ *  - Start from a fresh StateOverride representing the committed chain state
+ *    (built via backend.newStateOverride()).  Forks of this override use
+ *    sp<T> CoW so untouched override families are shared across candidates.
+ *  - Greedily pick the highest-value transaction at each step, re-evaluating
+ *    computeValue against the simulated state after each pick.  This
+ *    correctly handles transactions whose value depends on the state
+ *    changes of earlier transactions in the block.
+ *  - Optimization loop runs until the deadline (not yet implemented; placeholder for
+ *    future swap/2-opt style improvement passes).
  *
- * One possible optimization strategy:
- *  - The ideal block includes as many transactions as possible, fails none of them,
- *    encodes the data as small as possible, and keeps it effectively indexed.
- *
- * These variables are affected by execution order and other details, so a MEV
- * builder is warranted.
- *
- * It is the job of the chain state and transaction failure logic to ensure that
- * data inconsistencies cannot be introduced, so this class does not worry about
- * these concerns.
+ * Returned transactions are in execution order.  Selected transactions are
+ * removed from the supplied mempool.
  */
 class MEVBuilder {
 public:
 	MEVBuilder(BlockchainBackend& backend);
 
 	/**
-	 * Builds a block by selecting transactions from the mempool that optimize for the defined "value".
+	 * Build a block by selecting transactions from the mempool that
+	 * optimize for total value.
 	 *
 	 * This method follows this process:
 	 * 1. Select the top maxTransactions transactions from the mempool, prioritizing those that optimize for the defined "value".
@@ -67,12 +67,15 @@ public:
 	 * 3. Remove selected transactions from the mempool.
 	 * 4. Return the selected transactions in the order that they should be executed.
 	 *
-	 * @param mempool List of transactions to consider for inclusion in the block.  Selected transactions are removed from the list.
-	 * @param maxTransactions Maximum number of transactions to include in the block
-	 * @param deadline Timestamp by which the block must be built
-	 * @return List of transactions included in the built block, in the order that they should be executed
+	 * @param mempool      Candidate transactions.  Selected ones are removed.
+	 * @param maxTransactions  Upper bound on transactions per block.
+	 * @param deadline     Wall-clock millis at which to stop the optimization
+	 *                     loop.  Pass 0 to skip the optimization loop entirely.
+	 * @return  Selected transactions in execution order.
 	 */
-	ArrayList<sp<Transaction>> buildBlock(ArrayList<sp<Transaction>>& mempool, uint16_t maxTransactions, uint64_t deadline) const;
+	ArrayList<sp<Transaction>> buildBlock(ArrayList<sp<Transaction>>& mempool,
+	                                       uint16_t maxTransactions,
+	                                       uint64_t deadline) const;
 
 private:
 	BlockchainBackend& backend;

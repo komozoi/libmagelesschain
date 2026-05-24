@@ -24,6 +24,11 @@
 #include "BlockchainConfig.h"
 #include "Logger.h"
 #include "Transaction.h"
+#include "ChainDesign.h"
+#include "BackendRegistry.h"
+#include "StateOverrideRegistry.h"
+#include "StateOverride.h"
+#include "TransactionTypeRegistry.h"
 #include "alloc/pointer.h"
 #include "ds/ArrayList.h"
 #include "ds/HashMap.h"
@@ -39,14 +44,14 @@ struct block_header_t {
 };
 
 /*
- * Backend to handle storage, validation, indexing, etc
- * of actual data.
+ * Backend storage layer.  Owns the durable epoch journal, the typed index
+ * registry, the override-family registry, and the per-backend transaction
+ * type registry.
  */
 class BlockchainBackend {
 public:
-	explicit BlockchainBackend(Logger& logger, const std::string& dataDir, const sp<BlockchainStateSnapshot>& initialState, BlockchainConfig config = {});
+	BlockchainBackend(Logger& logger, const std::string& dataDir, sp<ChainDesign> design, BlockchainConfig config = {});
 
-	// Only one instance of this should probably exist at a time.
 	BlockchainBackend(BlockchainBackend const&) = delete;
 	BlockchainBackend(BlockchainBackend&&) = delete;
 
@@ -58,16 +63,35 @@ public:
 	uint64_t getLastBlockTimestamp() const;
 	uint64_t getLastBlockTime() const;
 
-	sp<BlockchainStateSnapshot> getLatestState() const { return latestState; }
-
 	const BlockchainConfig& getConfig() const { return config; }
 	const std::string& getDataDir() const { return dataDir; }
+
+	/*
+	 * Build a fresh StateOverride representing the committed chain state
+	 * with no pending modifications.  The frontend uses this as the base
+	 * for its speculative mempool view, and MEVBuilder uses it as the base
+	 * for forked candidates.
+	 */
+	sp<StateOverride> newStateOverride() const;
+
+	/*
+	 * Typed access to a registered Index instance.  Returns null sp<T> if
+	 * no instance of type T with that id has been registered.
+	 */
+	template<typename T>
+	sp<T> index(uint8_t id) const {
+		return indexes.getIndex<T>(id);
+	}
+
+	const TransactionTypeRegistry& getTransactionTypeRegistry() const { return txTypes; }
+	const StateOverrideRegistry& getStateOverrideRegistry() const { return overrideReg; }
 
 	~BlockchainBackend();
 
 private:
 	MmapHandle* getEpochFile(uint64_t blockNumber);
 	uint32_t getBlockOffset(uint64_t blockNumber);
+	void replayJournalIntoCommittedOverride();
 
 	BlockchainConfig config;
 	std::string dataDir;
@@ -75,10 +99,18 @@ private:
 	MmapHandle metadataFile;
 	blockchain_metadata_header_t* header;
 
+	sp<ChainDesign> design;
+	BackendRegistry indexes;
+	StateOverrideRegistry overrideReg;
+	TransactionTypeRegistry txTypes;
+
+	// Interim: reconstructed committed-chain state.  Replaced when the
+	// segment-backed index storage layer lands.
+	sp<StateOverride> committedInterim;
+
 	LogEndpoint log;
 
 	uint64_t lastBlockTime = 0;
-	sp<BlockchainStateSnapshot> latestState;
 };
 
 

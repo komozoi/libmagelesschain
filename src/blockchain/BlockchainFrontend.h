@@ -21,17 +21,29 @@
 
 #include <thread>
 #include <atomic>
+#include <mutex>
+
 #include "BlockchainBackend.h"
 #include "BlockchainConfig.h"
 #include "MEVBuilder.h"
+#include "StateOverride.h"
 
 
 /*
+ * Application-facing handle to the chain.  Owns the mempool, the speculative
+ * StateOverride that reflects the speculative effect of every mempool
+ * transaction on top of the committed chain, and the background block-
+ * builder thread.
+ *
  * The blockchain frontend and backend are separated to abstract certain details.
  * The frontend works more like a database, allowing quick read/write access and abstraction of
  * transactions with the tradeoff that some data may not be final or completely visible yet.
  * The backend handles writing to disk and stores persistent state, with the tradeoff that state is
  * processed in discreet blocks, which may not be fast enough for real-time data use.
+ *
+ * The frontend never opens index, segment, container, or catalog files.
+ * Its only filesystem responsibility is mempool.bin in the backend's data
+ * directory.
  */
 class BlockchainFrontend {
 public:
@@ -47,24 +59,36 @@ public:
 	int getBlockHeight() const { return backend.getBlockHeight(); }
 	int getMempoolSize() const { return mempool.size(); }
 
+	/*
+	 * Submit a transaction to the mempool.  The frontend's speculative
+	 * StateOverride is updated immediately so that subsequent reads see
+	 * the pending changes.
+	 */
 	void sendTransaction(const sp<Transaction>& transaction);
 
 	sp<Transaction> getTransactionById(uint64_t id) const;
 	ArrayList<sp<Transaction>> getTransactionsByTimeWindow(uint64_t startMillis, uint64_t endMillis);
 
-	sp<BlockchainStateSnapshot> getState() const { return state; }
+	/*
+	 * Speculative state: the committed chain plus every transaction
+	 * currently in the mempool, applied in mempool order.  Tests and
+	 * applications read through this to see the chain "as it would be"
+	 * if all pending transactions committed.
+	 */
+	sp<StateOverride> getState() const { return state; }
 
 private:
 	void blockBuilderLoop();
 	void saveMempool();
 	void loadMempool();
+	void rebuildSpeculativeState();
 
 	BlockchainBackend& backend;
 	BlockchainConfig config;
 	MEVBuilder mevBuilder;
-	sp<BlockchainStateSnapshot> state;
+	sp<StateOverride> state;
 	ArrayList<sp<Transaction>> mempool;
-	std::mutex mempoolMutex;
+	mutable std::mutex mempoolMutex;
 
 	std::thread builderThread;
 	std::atomic<bool> running;

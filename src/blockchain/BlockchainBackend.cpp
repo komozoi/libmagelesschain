@@ -17,15 +17,13 @@
  */
 
 #include "BlockchainBackend.h"
-#include "BlockchainStateSnapshot.h"
 
 #include <fcntl.h>
-
-#include "universaltime.h"
-#include "alloc/pointer.h"
-
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <stdexcept>
+
+#include "universaltime.h"
 
 #define FILE_VERSION_00_00_00 0xC7000000
 #define CURRENT_FILE_VERSION FILE_VERSION_00_00_00
@@ -62,8 +60,8 @@ struct blockchain_epoch_header_t {
 };
 
 
-BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir, const sp<BlockchainStateSnapshot>& initialState, BlockchainConfig config)
-	: config(config), dataDir(dataDir), openEpochs(32), log(logger, "BlockchainBackend"), latestState(initialState.copy(UNIQUE)) {
+BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir, sp<ChainDesign> design, BlockchainConfig config)
+	: config(config), dataDir(dataDir), openEpochs(32), design(std::move(design)), log(logger, "BlockchainBackend") {
 	mkdir(dataDir.c_str(), 0770);
 	mkdir((dataDir + "/epochs").c_str(), 0770);
 	FdHandle metadataHandle = FdHandle::open((dataDir + "/metadata.bin").c_str(), O_RDWR | O_CREAT, 0660);
@@ -73,18 +71,33 @@ BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir,
 		*header = {CURRENT_FILE_VERSION, 0, 0};
 	}
 
-	// Reapply history to the latest state if it exists
-	// TODO: This should rely on the indexing, and never replay transactions.
-	//       This allows us to test for now though.
-	if (latestState) {
-		long height = header->currentBlockHeight;
-		for (long h = 0; h < height; ++h) {
-			ArrayList<sp<Transaction>> transactions = getBlock(h);
-			for (const sp<Transaction>& tx : transactions) {
-				tx->apply(latestState.mut());
-			}
+	// Populate registries from the application's chain design.  Order
+	// matters: indexes, then overrides, then transaction types.
+	this->design.mut().registerIndexes(indexes);
+	this->design.mut().registerOverrides(overrideReg);
+	this->design.mut().registerTransactionTypes(txTypes);
+
+	// Build the interim committed-state override and replay the journal.
+	committedInterim = sp<StateOverride>::create(overrideReg);
+	replayJournalIntoCommittedOverride();
+}
+
+void BlockchainBackend::replayJournalIntoCommittedOverride() {
+	long height = header->currentBlockHeight;
+	for (long h = 0; h < height; ++h) {
+		ArrayList<sp<Transaction>> transactions = getBlock(h);
+		for (const sp<Transaction>& tx : transactions) {
+			tx->apply(committedInterim.mut());
 		}
 	}
+}
+
+sp<StateOverride> BlockchainBackend::newStateOverride() const {
+	// Deep copy so the caller can mutate freely without disturbing the
+	// committed state.  Once segment-backed indexes land, this will return
+	// a fresh empty StateOverride that reads through the indexes for
+	// committed data.
+	return committedInterim.copy(UNIQUE);
 }
 
 long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions) {
@@ -143,10 +156,10 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 
 	msync(header, sizeof(blockchain_metadata_header_t), MS_SYNC);
 
-	if (latestState) {
-		for (const sp<Transaction>& tx : transactions) {
-			tx->apply(latestState.mut());
-		}
+	// Apply the block's transactions into the interim committed state so
+	// subsequent calls to newStateOverride() see the new state.
+	for (const sp<Transaction>& tx : transactions) {
+		tx->apply(committedInterim.mut());
 	}
 
 	lastBlockTime = duration;
@@ -171,7 +184,7 @@ ArrayList<sp<Transaction>> BlockchainBackend::getBlock(uint64_t blockNumber) {
 	block_header_t* blockHeader = epochFile->directPointer<block_header_t>(blockOffset);
 	epochFile->seek(blockOffset + sizeof(block_header_t));
 	for (int i = 0; i < blockHeader->numTransactions; ++i) {
-		sp<Transaction> tx = Transaction::read(epochFile);
+		sp<Transaction> tx = txTypes.read(epochFile);
 		if (!tx)
 			throw std::runtime_error("Failed to deserialize transaction");
 		results.add(tx);
@@ -195,7 +208,7 @@ ArrayList<sp<Transaction>> BlockchainBackend::getTransactionsByTimeWindow(uint64
 		if (blockHeader->millis >= startMillis && blockHeader->millis <= endMillis) {
 			epochFile->seek(blockOffset + sizeof(block_header_t));
 			for (int i = 0; i < blockHeader->numTransactions; ++i) {
-				if (sp<Transaction> tx = Transaction::read(epochFile))
+				if (sp<Transaction> tx = txTypes.read(epochFile))
 					results.add(tx);
 			}
 		}

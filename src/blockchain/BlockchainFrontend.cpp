@@ -17,14 +17,16 @@
  */
 
 #include "BlockchainFrontend.h"
-#include "BlockchainStateSnapshot.h"
-#include "universaltime.h"
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+
+#include "universaltime.h"
 
 BlockchainFrontend::BlockchainFrontend(BlockchainBackend& backend, BlockchainConfig config)
-	: backend(backend), config(config), mevBuilder(backend), state(backend.getLatestState()), running(true) {
+	: backend(backend), config(config), mevBuilder(backend), state(backend.newStateOverride()), running(true) {
 	loadMempool();
 	builderThread = std::thread(&BlockchainFrontend::blockBuilderLoop, this);
 }
@@ -38,8 +40,18 @@ BlockchainFrontend::~BlockchainFrontend() {
 
 void BlockchainFrontend::sendTransaction(const sp<Transaction>& transaction) {
 	std::lock_guard _(mempoolMutex);
-	if (state) transaction->apply(state.mut());
+	transaction->apply(state.mut());
 	mempool.add(transaction);
+}
+
+void BlockchainFrontend::rebuildSpeculativeState() {
+	// Called under mempoolMutex.  After the backend commits a block, the
+	// speculative state must be rebuilt from the new committed state and
+	// the still-pending mempool transactions reapplied in order.
+	state = backend.newStateOverride();
+	for (const sp<Transaction>& tx : mempool) {
+		tx->apply(state.mut());
+	}
 }
 
 void BlockchainFrontend::blockBuilderLoop() {
@@ -61,9 +73,18 @@ void BlockchainFrontend::blockBuilderLoop() {
 		if (toBuild.size() > 0) {
 			long blockNumber = backend.addBlock(toBuild);
 			if (blockNumber == -1) {
-				// Re-insert transactions if block building failed (e.g. too early)
+				// Block building was rejected (e.g. too early).  Put the
+				// transactions back into the mempool in their original
+				// positions.  We don't try to preserve absolute ordering
+				// against newly-arrived mempool entries; the next pass
+				// will reconsider everything.
 				std::lock_guard _(mempoolMutex);
 				mempool.addMany(toBuild);
+			} else {
+				// Committed: rebuild the speculative state so the frontend
+				// view stops double-counting the committed transactions.
+				std::lock_guard _(mempoolMutex);
+				rebuildSpeculativeState();
 			}
 		}
 	}
@@ -73,17 +94,17 @@ void BlockchainFrontend::saveMempool() {
 	std::string path = backend.getDataDir() + "/mempool.bin";
 	FdHandle fd = FdHandle::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0660);
 	if (!fd) return;
-	
+
 	std::lock_guard _(mempoolMutex);
 	uint32_t count = mempool.size();
 	fd.write(count);
-	
+
 	size_t totalSize = 0;
 	for (const sp<Transaction>& tx : mempool) totalSize += tx->size();
-	
+
 	if (totalSize > 0) {
 		if (ftruncate(fd.getFd(), sizeof(uint32_t) + totalSize) != 0) return;
-		
+
 		MmapHandle mmap = fd.getMmapHandle(0, sizeof(uint32_t) + totalSize);
 		if (mmap) {
 			mmap.seek(sizeof(uint32_t));
@@ -100,23 +121,24 @@ void BlockchainFrontend::loadMempool() {
 	std::string path = backend.getDataDir() + "/mempool.bin";
 	FdHandle fd = FdHandle::open(path.c_str(), O_RDONLY);
 	if (!fd) return;
-	
+
 	uint32_t count;
 	if (fd.read(count) != sizeof(uint32_t)) return;
 	if (count == 0) return;
-	
+
 	off_t fileSize = fd.seek(0, SEEK_END);
 	if (fileSize <= (off_t)sizeof(uint32_t)) return;
-	
+
 	MmapHandle mmap = fd.getMmapHandle(0, fileSize, PROT_READ);
 	if (!mmap) return;
-	
+
 	mmap.seek(sizeof(uint32_t));
 	std::lock_guard _(mempoolMutex);
+	const TransactionTypeRegistry& reg = backend.getTransactionTypeRegistry();
 	for (uint32_t i = 0; i < count; ++i) {
-		sp<Transaction> tx = Transaction::read(&mmap);
+		sp<Transaction> tx = reg.read(&mmap);
 		if (tx) {
-			if (state) tx->apply(state.mut());
+			tx->apply(state.mut());
 			mempool.add(tx);
 		}
 	}
@@ -136,7 +158,7 @@ sp<Transaction> BlockchainFrontend::getTransactionById(uint64_t id) const {
 
 ArrayList<sp<Transaction>> BlockchainFrontend::getTransactionsByTimeWindow(uint64_t startMillis, uint64_t endMillis) {
 	ArrayList<sp<Transaction>> results;
-	
+
 	// Check mempool
 	if (backend.getLastBlockTimestamp() < endMillis) {
 		std::lock_guard _(mempoolMutex);

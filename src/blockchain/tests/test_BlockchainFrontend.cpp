@@ -18,21 +18,17 @@
 
 #include <gtest/gtest.h>
 
-#include "blockchain/BlockchainBackend.h"
-
 #include <filesystem>
 #include <unistd.h>
 
+#include "blockchain/BlockchainBackend.h"
+#include "blockchain/BlockchainFrontend.h"
+#include "blockchain/BlockchainConfig.h"
+#include "blockchain/StateOverride.h"
+#include "blockchain/Transaction.h"
 #include "universaltime.h"
 
-#include "blockchain/BlockchainFrontend.h"
-#include "blockchain/Transaction.h"
-#include "blockchain/BlockchainConfig.h"
-
 #include "testutil/TestChainDesign.h"
-
-
-namespace fs = std::filesystem;
 
 
 class BlockchainFrontendTest : public ::testing::Test {
@@ -40,43 +36,49 @@ protected:
 	std::string testDir;
 	Logger logger;
 
-	BlockchainFrontendTest() : logger("cmake-build-debug/test_logs", 0, 0) {
-		Transaction::registerType(1, TestTransaction::createFromMmap);
+	BlockchainFrontendTest() : logger("cmake-build-debug/test_logs", 0, 0) {}
+
+	sp<ChainDesign> makeDesign() {
+		return sp<ChainDesign>(sp<TestChainDesign>::create());
 	}
 
 	void SetUp() override {
 		uint64_t seconds = millis_since_epoch() / 1000;
 		std::string testName = ::testing::UnitTest::GetInstance()->current_test_info()->name();
 		testDir = "cmake-build-debug/test_data/" + std::to_string(seconds) + "-" + testName;
-		fs::create_directories(testDir);
-		fs::create_directories(testDir + "/epochs");
+		std::filesystem::create_directories(testDir);
+		std::filesystem::create_directories(testDir + "/epochs");
 	}
 
 	void TearDown() override {
-		if (!testDir.empty() && fs::exists(testDir)) {
-			fs::remove_all(testDir);
+		if (!testDir.empty() && std::filesystem::exists(testDir)) {
+			std::filesystem::remove_all(testDir);
 		}
 	}
 };
 
+static int currentSum(const BlockchainFrontend& frontend) {
+	return frontend.getState()->override<TestSumOverrideFamily>(0).sum;
+}
+
 TEST_F(BlockchainFrontendTest, BasicInitialState) {
-	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+	BlockchainBackend backend(logger, testDir, makeDesign());
 	BlockchainFrontend frontend(backend);
 
 	EXPECT_EQ(frontend.getBlockHeight(), 0);
 	EXPECT_EQ(frontend.getMempoolSize(), 0);
-	EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 0);
+	EXPECT_EQ(currentSum(frontend), 0);
 }
 
 TEST_F(BlockchainFrontendTest, AddTransactionToMempool) {
-	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+	BlockchainBackend backend(logger, testDir, makeDesign());
 	BlockchainFrontend frontend(backend);
 
 	sp<TestTransaction> tx = sp<TestTransaction>::create(10);
 	frontend.sendTransaction(tx);
 
 	EXPECT_EQ(frontend.getMempoolSize(), 1);
-	EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 10);
+	EXPECT_EQ(currentSum(frontend), 10);
 }
 
 TEST_F(BlockchainFrontendTest, BuildBlockOnTransactionCount) {
@@ -84,7 +86,7 @@ TEST_F(BlockchainFrontendTest, BuildBlockOnTransactionCount) {
 	config.targetBlockTimeMs = 1000;
 	config.targetThroughput = 10;
 
-	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+	BlockchainBackend backend(logger, testDir, makeDesign(), config);
 	BlockchainFrontend frontend(backend, config);
 
 	for (int i = 0; i < 30; ++i) {
@@ -100,15 +102,15 @@ TEST_F(BlockchainFrontendTest, BuildBlockOnTransactionCount) {
 
 	EXPECT_GT(frontend.getBlockHeight(), 0);
 	EXPECT_LT(frontend.getMempoolSize(), 30);
-	EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 30);
+	EXPECT_EQ(currentSum(frontend), 30);
 }
 
 TEST_F(BlockchainFrontendTest, BasicStateRecovery) {
 	{
 		BlockchainConfig config;
-		config.targetBlockTimeMs = 100; // Fast for test
+		config.targetBlockTimeMs = 100;
 		config.targetThroughput = 10;
-		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+		BlockchainBackend backend(logger, testDir, makeDesign(), config);
 		BlockchainFrontend frontend(backend, config);
 
 		for (int i = 0; i < 30; ++i) {
@@ -121,15 +123,15 @@ TEST_F(BlockchainFrontendTest, BasicStateRecovery) {
 			usleep(20000);
 		}
 		EXPECT_GT(frontend.getBlockHeight(), 0);
-		EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 60);
+		EXPECT_EQ(currentSum(frontend), 60);
 	}
 
 	// Reload
 	{
-		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+		BlockchainBackend backend(logger, testDir, makeDesign());
 		BlockchainFrontend frontend(backend);
 		EXPECT_GT(frontend.getBlockHeight(), 0);
-		EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 60);
+		EXPECT_EQ(currentSum(frontend), 60);
 	}
 }
 
@@ -138,7 +140,7 @@ TEST_F(BlockchainFrontendTest, AdvancedStateRecovery) {
 		BlockchainConfig config;
 		config.targetBlockTimeMs = 100;
 		config.targetThroughput = 10;
-		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+		BlockchainBackend backend(logger, testDir, makeDesign(), config);
 		BlockchainFrontend frontend(backend, config);
 
 		for (int i = 0; i < 30; ++i) {
@@ -156,12 +158,12 @@ TEST_F(BlockchainFrontendTest, AdvancedStateRecovery) {
 		frontend.sendTransaction(sp<TestTransaction>::create(10));
 		frontend.sendTransaction(sp<TestTransaction>::create(20));
 		EXPECT_GE(frontend.getMempoolSize(), 2);
-		EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 30 + 10 + 20);
+		EXPECT_EQ(currentSum(frontend), 30 + 10 + 20);
 	}
 
 	// Reload
 	{
-		BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+		BlockchainBackend backend(logger, testDir, makeDesign());
 		BlockchainFrontend frontend(backend);
 		// Wait a bit for mempool to load and background thread to possibly do something
 		usleep(200000);
@@ -170,12 +172,12 @@ TEST_F(BlockchainFrontendTest, AdvancedStateRecovery) {
 		EXPECT_EQ(frontend.getBlockHeight(), 1);
 		// Mempool should have been recovered
 		EXPECT_GE(frontend.getMempoolSize(), 2);
-		EXPECT_EQ(((const TestState&)*frontend.getState()).sum, 60);
+		EXPECT_EQ(currentSum(frontend), 60);
 	}
 }
 
 TEST_F(BlockchainFrontendTest, TimeQueryFeature) {
-	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0));
+	BlockchainBackend backend(logger, testDir, makeDesign());
 	BlockchainFrontend frontend(backend);
 
 	uint64_t start = millis_since_epoch();
@@ -197,7 +199,7 @@ TEST_F(BlockchainFrontendTest, TransactionQueryById) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 10;
 	config.targetThroughput = 10;
-	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+	BlockchainBackend backend(logger, testDir, makeDesign(), config);
 	BlockchainFrontend frontend(backend, config);
 
 	// Add transactions and wait for block
@@ -213,20 +215,18 @@ TEST_F(BlockchainFrontendTest, TransactionQueryById) {
 	// ID = (blockHeight << 20) | index
 	uint64_t id = (0ULL << 20) | 3;
 	sp<Transaction> tx4 = frontend.getTransactionById(id);
+	ASSERT_TRUE((bool)tx4);
 
-	TestState state(backend, 1);
-	EXPECT_EQ(state.sum, 0);
-	EXPECT_TRUE(tx4->apply(state));
-	// MEVBuilder sorts by value descending. Top 10 are 19, 18, 17, 16, 15, 14, 13, 12, 11, 10.
+	// MEVBuilder sorts by value descending.  Top 10 are 19, 18, 17, 16, 15, 14, 13, 12, 11, 10.
 	// Index 3 is value 16.
-	EXPECT_EQ(state.sum, 16);
+	EXPECT_EQ(((TestTransaction&)*tx4).value, 16);
 }
 
 TEST_F(BlockchainFrontendTest, BlockBuilderTiming) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 1000;
 	config.targetThroughput = 10;
-	BlockchainBackend backend(logger, testDir, sp<TestState>::create(backend, 0), config);
+	BlockchainBackend backend(logger, testDir, makeDesign(), config);
 	BlockchainFrontend frontend(backend, config);
 
 	// Sanity check
@@ -246,25 +246,20 @@ TEST_F(BlockchainFrontendTest, BlockBuilderTiming) {
 	}
 	EXPECT_EQ(frontend.getBlockHeight(), 1);
 
-    // Create the second block; this should take about 1s (within 5% = 50ms)
-    uint64_t start = millis_since_epoch();
-    for (int i = 0; i < 10; ++i) {
-        frontend.sendTransaction(sp<TestTransaction>::create(i));
-    }
+	uint64_t start = millis_since_epoch();
+	for (int i = 0; i < 10; ++i) {
+		frontend.sendTransaction(sp<TestTransaction>::create(i));
+	}
 
-    // Wait for block
-    int retries = 200;
-    while (frontend.getBlockHeight() == 1 && retries-- > 0) {
-        usleep(10000);
-    }
-    uint64_t end = millis_since_epoch();
-    usleep(20000); // Wait a bit more for backend to update lastBlockTime
-    uint64_t elapsed = end - start;
+	int retries = 200;
+	while (frontend.getBlockHeight() == 1 && retries-- > 0) {
+		usleep(10000);
+	}
+	uint64_t end = millis_since_epoch();
+	usleep(20000);
+	uint64_t elapsed = end - start;
 
-    // Should take about 1s (within 5% = 50ms)
-    EXPECT_NEAR(elapsed, config.targetBlockTimeMs, config.targetBlockTimeMs / 20);
-    EXPECT_EQ(frontend.getBlockHeight(), 2);
-
-    // Check that the block time measurement is correct
-    EXPECT_NEAR(elapsed, backend.getLastBlockTime(), 10);
+	EXPECT_NEAR(elapsed, config.targetBlockTimeMs, config.targetBlockTimeMs / 20);
+	EXPECT_EQ(frontend.getBlockHeight(), 2);
+	EXPECT_NEAR(elapsed, backend.getLastBlockTime(), 10);
 }
