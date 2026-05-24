@@ -124,6 +124,28 @@ TEST_F(MEVBuilderTest, ComplexExecutionOrderDependency) {
 	EXPECT_EQ(((TestTransaction&)*mempool.get(0)).id, 1);
 }
 
+TEST_F(MEVBuilderTest, StartsFromBackendNotFrontendState) {
+	// The builder must work from a fresh backend StateOverride; tests pin
+	// this by mutating an unrelated override copy and ensuring the
+	// builder's selection is unaffected.
+	BlockchainBackend backend(logger, testDir, makeDesign());
+	MEVBuilder builder(backend);
+
+	// Independently mutate a separate override; the builder should not
+	// see this when scoring transactions.
+	sp<StateOverride> stray = backend.newStateOverride();
+	stray.mut().override<TestSumOverrideFamily>(0).count = 100;
+
+	ArrayList<sp<Transaction>> mempool;
+	mempool.add(sp<TestTransaction>::create(0, 3));  // id=3: 15 if count==0 else 1
+	mempool.add(sp<TestTransaction>::create(0, 1));  // id=1: always 10
+
+	// With a fresh backend state, id=3 starts at 15 so it should win over id=1.
+	ArrayList<sp<Transaction>> block = builder.buildBlock(mempool, 1, 0);
+	ASSERT_EQ(block.size(), 1);
+	EXPECT_EQ(((TestTransaction&)*block.get(0)).id, 3);
+}
+
 TEST_F(MEVBuilderTest, ExecutionOrderDependency) {
 	BlockchainBackend backend(logger, testDir, makeDesign());
 	MEVBuilder builder(backend);

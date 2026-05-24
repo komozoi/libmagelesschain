@@ -164,6 +164,43 @@ TEST_F(BlockchainBackendTest, TimeWindowQuery) {
 	EXPECT_EQ(results13.size(), 2);
 }
 
+TEST_F(BlockchainBackendTest, TypedIndexAccessorReachable) {
+	BlockchainConfig config;
+	config.targetBlockTimeMs = 10;
+	BlockchainBackend backend(logger, testDir, makeDesign(), config);
+
+	ArrayList<sp<Transaction>> txs;
+	txs.add(sp<TestTransaction>::create(7));
+	txs.add(sp<TestTransaction>::create(11));
+	backend.addBlock(txs);
+
+	// The typed accessor reaches the registered index instance directly.
+	// Phase 1 storage of committed state lives behind newStateOverride,
+	// but the BackendRegistry contract itself is exercised here.
+	sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
+	ASSERT_NE(idx.get(), nullptr);
+}
+
+TEST_F(BlockchainBackendTest, NewStateOverrideIsFreshAndIsolated) {
+	BlockchainConfig config;
+	config.targetBlockTimeMs = 10;
+	BlockchainBackend backend(logger, testDir, makeDesign(), config);
+
+	ArrayList<sp<Transaction>> txs;
+	txs.add(sp<TestTransaction>::create(5));
+	backend.addBlock(txs);
+
+	sp<StateOverride> a = backend.newStateOverride();
+	int aBefore = a->override<TestSumOverrideFamily>(0).sum;
+
+	// Mutate a; do not modify backend.
+	a.mut().override<TestSumOverrideFamily>(0).sum = 999;
+
+	sp<StateOverride> b = backend.newStateOverride();
+	EXPECT_EQ(b->override<TestSumOverrideFamily>(0).sum, aBefore);
+	EXPECT_NE(b->override<TestSumOverrideFamily>(0).sum, 999);
+}
+
 TEST_F(BlockchainBackendTest, MultipleBlocksInOneEpoch) {
 	BlockchainConfig config;
 	config.targetBlockTimeMs = 10;
