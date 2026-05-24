@@ -39,16 +39,16 @@
  * range-scan semantics, not on whether one or many physical catalog files
  * back them.
  *
- * There is no "obsolete" state.  When compaction replaces N input
- * segments with one merged output, the inputs are removed from the
- * catalog entirely (via remove()) and their disk regions are freed back
- * to the container's FreeSpaceFile.  An old segment is part of the index
- * for as long as it lives in the catalog; once removed it is gone.
+ * Every entry in the catalog is live: a segment is part of the index
+ * for as long as it lives in the catalog.  Compaction replaces N input
+ * segments with one merged output, removes the inputs via remove(), and
+ * frees their disk regions back to the container's FreeSpaceFile.
  *
- * The catalog file is *not* fsync'd.  Per §12.6 the journal is the
- * source of truth; the catalog can always be rebuilt from it.
+ * The catalog file is treated as a derived structure: per §12.6 the
+ * journal is the source of truth and the catalog can always be rebuilt
+ * from it, so writes are not fsync'd.
  *
- * TODO: Implement proper catalog per the proposal, using BTrees
+ * TODO: Implement proper catalog per the proposal, using BTrees.
  */
 class Catalog {
 public:

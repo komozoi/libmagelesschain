@@ -35,10 +35,11 @@
  * regions (from merged-out segments) can be reused by future writes inside
  * the same container.
  *
- * One container file per (persistentTypeId, instanceId, containerId).
- * Index silo'ing means segments from different indexes never share a
- * container.  Phase 2 keeps one container per instance; size-threshold
- * rollover is hooked but not exercised by the current tests.
+ * One container file per (persistentTypeId, instanceId, containerId),
+ * so segments from different indexes are siloed in different files.
+ * The current implementation keeps a single container per instance
+ * (containerId 0); the API is containerId-aware so size-threshold
+ * rollover can plug in by writing into a new containerId.
  */
 class IndexContainer {
 public:

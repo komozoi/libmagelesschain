@@ -45,20 +45,18 @@ class IndexContainerManager;
  *      these and uses them for every subsequent query.
  *   3. At block commit time the backend asks the matching override family
  *      to seal() a payload, writes that payload through the container,
- *      and inserts a catalog entry.  The index does not need to "see"
- *      this happen: its next query will discover the new segment via the
- *      catalog.
+ *      and inserts a catalog entry.  Indexes pick up the new segment
+ *      lazily on their next query via the catalog.
  *   4. When the catalog reports too many segments, the backend calls
  *      mergeSegments() with the locators it picked for compaction.  The
  *      index returns the merged payload as a single Bytestring; the
  *      backend writes it, catalogs it, and deletes the inputs.
  *
- * Indexes own their queries and decide which
- * segments are relevant for each one.
- * Compacted-away segments are deleted from the catalog and their disk
- * regions are returned to the FreeSpaceFile.  An old segment is not
- * outdated by virtue of being older; it still authoritatively covers its
- * block range and is part of the index.
+ * Indexes own their queries and decide which segments are relevant for
+ * each one.  Every segment present in the catalog authoritatively covers
+ * its recorded block range; compaction replaces multiple inputs with one
+ * output covering their union and returns the inputs' disk regions to
+ * the FreeSpaceFile.
  */
 class BlockchainIndex {
 public:

@@ -85,9 +85,9 @@ BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir,
 	containerManager = sp<IndexContainerManager>::create(dataDir + "/indexes");
 
 	// Wire each registered index to its on-disk storage so it can answer
-	// queries by mmap'ing segments from the catalog.  No transaction
-	// replay and no in-RAM state reconstruction; the segments themselves
-	// are the materialized committed state.
+	// queries by mmap'ing segments listed in the catalog.  The segments
+	// themselves are the materialized committed state, so opening the
+	// chain costs O(catalog metadata) regardless of chain size.
 	attachIndexesToStorage();
 }
 
@@ -116,8 +116,8 @@ void BlockchainBackend::attachOverrideFamilies(StateOverride& state) const {
 sp<StateOverride> BlockchainBackend::newStateOverride() const {
 	// Build a fresh, empty override and wire each family up to its
 	// matching index so read-through accessors and seal() can resolve
-	// committed state on demand via the catalog.  No deep copy of chain
-	// state, no replay: the committed state lives on disk in segments.
+	// committed state on demand via the catalog.  The committed state
+	// itself lives on disk in segments and is read lazily by the index.
 	sp<StateOverride> s = sp<StateOverride>(UNIQUE, overrideReg);
 	attachOverrideFamilies(s.mut());
 	return s;
@@ -140,7 +140,7 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 		// Block time should stay in the range of 100ms to 600s.
 		uint64_t blockTime = std::max(std::min((uint64_t)config.targetBlockTimeMs * config.targetThroughput / (uint32_t)transactions.size(), (uint64_t)600 * 1000), (uint64_t)100);
 		if (duration < blockTime || (duration > LONG_TIME_MILLIS && transactions.size() > WANTED_TX_PER_BLOCK/2) || transactions.size() > MAX_TX_PER_BLOCK)
-			// Not time to mine yet
+			// Wait for the configured cadence before sealing this block.
 			return -1;
 	}
 
@@ -211,8 +211,8 @@ void BlockchainBackend::sealOverrideToSegments(StateOverride& state, uint64_t bl
 		uint8_t instanceId = e.id;
 
 		// Persist the payload through the container, then catalog it.
-		// The index is not notified directly: its next query discovers
-		// the new segment through the catalog and mmaps the payload
+		// The index will discover the new segment lazily on its next
+		// query by range-scanning the catalog and mmaping the payload
 		// from the container on demand.
 		IndexContainer* container = containerManager.mut().get(persistentTypeId, instanceId, 0);
 		uint64_t offset = container->writePayload(payload);
@@ -293,9 +293,8 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	catalog.mut().insert(out);
 
 	// Delete the input catalog entries and return their disk regions to
-	// the container's FreeSpaceFile.  Merged-away segments are not kept
-	// around as "obsolete"; the merged output authoritatively covers
-	// their block range and the inputs are gone.
+	// the container's FreeSpaceFile.  The merged output authoritatively
+	// covers the combined block range of its inputs.
 	catalog.mut().remove(a);
 	catalog.mut().remove(b);
 	container->freeRegion(a.byteOffset, a.byteLength);

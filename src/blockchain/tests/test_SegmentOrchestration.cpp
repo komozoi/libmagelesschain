@@ -105,7 +105,7 @@ TEST_F(SegmentOrchestrationTest, BlockCommitCreatesSegmentAndCatalogEntry) {
 	EXPECT_EQ(idx->latestCount(), 3);
 }
 
-TEST_F(SegmentOrchestrationTest, ReopenLoadsIndexStateFromSegments) {
+TEST_F(SegmentOrchestrationTest, ReopenProvidesIndexStateFromSegments) {
 	// First lifetime: commit a couple of blocks.
 	{
 		BlockchainBackend backend(logger, testDir, design, fastConfig());
@@ -116,8 +116,8 @@ TEST_F(SegmentOrchestrationTest, ReopenLoadsIndexStateFromSegments) {
 		EXPECT_EQ(idx->latestCount(), 6);
 	}
 
-	// Second lifetime: must rebuild from segments only (the test
-	// transaction's apply() is therefore NOT replayed).
+	// Second lifetime: The persisted segments are still accessible and
+	// searchable after close + reopen
 	{
 		BlockchainBackend backend(logger, testDir, design, fastConfig());
 		EXPECT_EQ(backend.getBlockHeight(), 2);
@@ -153,10 +153,10 @@ TEST_F(SegmentOrchestrationTest, CompactionMergesWhenAboveThreshold) {
 	EXPECT_EQ(idx->latestSum(), expectedSum);
 	EXPECT_EQ(idx->latestCount(), expectedCount);
 
-	// Catalog non-obsolete count should be at or below the threshold by
-	// at least the merge generations we've done (verified indirectly:
-	// state stays correct after a reopen that walks all non-obsolete
-	// segments).
+	// The catalog's segment count for this index should sit at or below
+	// the configured threshold thanks to the merges performed above;
+	// this is verified indirectly by reopening the chain and confirming
+	// the index indicates the same state.
 }
 
 TEST_F(SegmentOrchestrationTest, CompactedChainReopensWithCorrectState) {

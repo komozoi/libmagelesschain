@@ -120,8 +120,8 @@ private:
 	 * (the i-th override family corresponds to the i-th index registered
 	 * by the ChainDesign), and for each non-empty seal payload writes the
 	 * payload through the container manager and inserts a catalog entry.
-	 * The index is never notified directly: its next query discovers the
-	 * new segment via the catalog and mmaps the payload from the
+	 * Indexes pick up the new segment lazily on their next query by
+	 * range-scanning the catalog and mmaping the payload from the
 	 * container.
 	 */
 	void sealOverrideToSegments(StateOverride& state, uint64_t blockNumber);
@@ -132,9 +132,8 @@ private:
 	 * maxMergeableSegmentBytes) into one.  The catalog records the merged
 	 * output, then the inputs are removed from the catalog entirely
 	 * (Catalog::remove) and their disk regions returned to the index's
-	 * FreeSpaceFile.  Merged-away segments are deleted, not kept around
-	 * as "obsolete"; the merged output authoritatively covers their block
-	 * range.
+	 * FreeSpaceFile.  The merged output authoritatively covers the
+	 * combined block range of its inputs.
 	 */
 	void maybeCompactIndex(uint16_t persistentTypeId, uint8_t instanceId, uint64_t currentBlock);
 

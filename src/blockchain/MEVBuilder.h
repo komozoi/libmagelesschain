@@ -47,8 +47,8 @@ class BlockchainBackend;
  *    computeValue against the simulated state after each pick.  This
  *    correctly handles transactions whose value depends on the state
  *    changes of earlier transactions in the block.
- *  - Optimization loop runs until the deadline (not yet implemented; placeholder for
- *    future swap/2-opt style improvement passes).
+ *  - After the greedy pass, an optimization loop runs until the deadline,
+ *    reserved for future swap/2-opt style improvement passes.
  *
  * Returned transactions are in execution order.  Selected transactions are
  * removed from the supplied mempool.

@@ -31,11 +31,11 @@
  * Concrete, library-owned container for one block-in-progress worth of
  * pending state modifications.
  *
- * Replaces the old cumulative-state BlockchainStateSnapshot.  Instead of
- * tracking the entire chain state in RAM, a StateOverride only carries the
- * deltas that pending transactions have produced on top of the committed
- * chain.  Untouched parts of the chain are read through the committed
- * indexes directly.
+ * A StateOverride carries the deltas that pending transactions have
+ * produced on top of the committed chain.  Untouched parts of the chain
+ * are read through the committed indexes directly, keeping the in-RAM
+ * footprint bounded by the size of the pending block rather than the
+ * size of the chain.
  *
  * Typed access:
  *   s.override<MyOverrideFamily>(id) returns a MyOverrideFamily& with no
@@ -71,8 +71,8 @@ public:
 	T& override(uint8_t id) {
 		TypeKey key = typeKey<T>();
 		ArrayList<sp<IndexOverrideFamilyBase>>* family = families.getPtr(key);
-		// id and registration must have been set up by ChainDesign; if not,
-		// this is a programming error in the application.
+		// The (type, id) pair must have been registered through ChainDesign;
+		// reaching here with an unregistered family is an application bug.
 		return (T&)family->get(id).mut();
 	}
 
@@ -84,9 +84,11 @@ public:
 	}
 
 	/*
-	 * Iterate all registered (type, id) entries and call seal() on each.
-	 * Used by the backend at commit time and reserved for the future
-	 * segment-storage layer.
+	 * Iterate every registered (type, id) family in registration order,
+	 * invoking `fn` with the family's TypeKey, instance id, mutable
+	 * reference, and the caller's context pointer.  Used by tests and by
+	 * tooling that wants to walk every family without knowing its concrete
+	 * type up front.
 	 */
 	void forEachFamily(void (*fn)(TypeKey, uint8_t, IndexOverrideFamilyBase&, void*), void* ctx);
 

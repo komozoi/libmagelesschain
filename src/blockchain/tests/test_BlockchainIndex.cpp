@@ -24,16 +24,14 @@
 /*
  * Lightweight interface contract tests for BlockchainIndex.
  *
- * BlockchainIndex is now a query handle: it does not hold any segment
- * payloads of its own, never has segments fed into it, and never produces
- * one out of thin air.  Instead, at query time it asks its attached
- * Catalog which segments cover the block range of interest and mmaps just
- * those payloads through its attached IndexContainerManager.
+ * BlockchainIndex is a query handle: at query time it asks its attached
+ * Catalog which segments cover the block range of interest and mmaps
+ * just those payloads through its attached IndexContainerManager.
  *
- * These tests only pin the bare-bones contract: encodingVersion() is
- * stable, attach() stores its arguments, and mergeSegments() with no
- * inputs returns an empty payload.  Full segment-orchestration behavior
- * is exercised end to end in test_SegmentOrchestration.cpp.
+ * These tests pin the bare-bones contract: encodingVersion() is stable,
+ * attach() stores its arguments, and mergeSegments() with no inputs
+ * returns an empty payload.  Full segment-orchestration behavior is
+ * exercised end to end in test_SegmentOrchestration.cpp.
  */
 
 TEST(BlockchainIndexTest, EncodingVersionIsStable) {
@@ -43,8 +41,8 @@ TEST(BlockchainIndexTest, EncodingVersionIsStable) {
 
 TEST(BlockchainIndexTest, AttachStoresStorageHandles) {
 	TestSumIndex idx;
-	// Without storage attached, latestSum() must be a benign zero rather
-	// than crashing (no segments, nothing to read).
+	// With no storage attached the index reports a benign zero, since
+	// there are no segments to read.
 	EXPECT_EQ(idx.latestSum(), 0);
 	EXPECT_EQ(idx.latestCount(), 0);
 }

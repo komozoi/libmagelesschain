@@ -25,10 +25,10 @@ MEVBuilder::MEVBuilder(BlockchainBackend& backend) : backend(backend) {}
 ArrayList<sp<Transaction>> MEVBuilder::buildBlock(ArrayList<sp<Transaction>>& mempool, uint16_t maxTransactions, uint64_t deadline) const {
 	if (mempool.size() == 0) return {};
 
-	// Fresh override representing committed state.  Forks of this for
-	// alternative candidate orderings would CoW per-family via sp<T>; the
-	// current implementation only explores one greedy order so it uses a
-	// single mutable override.
+	// Fresh override representing committed state.  The greedy pass
+	// below mutates this override directly; once candidate exploration
+	// is added, forks will sp<T>-CoW per family so untouched families
+	// are shared across branches.
 	sp<StateOverride> simState = backend.newStateOverride();
 
 	ArrayList<sp<Transaction>> selected;
@@ -65,8 +65,8 @@ ArrayList<sp<Transaction>> MEVBuilder::buildBlock(ArrayList<sp<Transaction>>& me
 		if (deadline != 0 && millis_since_epoch() >= deadline) break;
 	}
 
-	// Optimization loop: try to improve the selected ordering until the
-	// deadline.  Placeholder; future versions can explore swaps/2-opt etc.
+	// Optimization loop: refine the selected ordering until the deadline.
+	// Reserved for swap/2-opt and similar improvement passes.
 	while (deadline != 0 && millis_since_epoch() < deadline) {
 		// TODO: explore swap and reordering improvements.
 		break;

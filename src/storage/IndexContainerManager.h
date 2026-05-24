@@ -33,11 +33,10 @@
  * Layout on disk:
  *   <dataDir>/indexes/<persistentTypeId>-<instanceId>-<containerId>.bin
  *
- * Phase 2 keeps one container per (typeId, instanceId), i.e. containerId
- * always 0.  Size-threshold rollover is supported by the storage primitives
- * (FreeSpaceFile) but not yet driven by the backend; the API is
- * intentionally containerId-aware so the rollover hook is a single-line
- * change in the future.
+ * The current implementation keeps one container per
+ * (persistentTypeId, instanceId), addressed at containerId 0.  The API
+ * is containerId-aware so a future size-threshold rollover policy can
+ * route writes to a new containerId without changing callers.
  */
 class IndexContainerManager {
 public:

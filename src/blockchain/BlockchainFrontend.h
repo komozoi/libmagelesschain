@@ -50,9 +50,8 @@ public:
 	BlockchainFrontend(BlockchainBackend& backend, BlockchainConfig config = {});
 	~BlockchainFrontend();
 
-	// Only one global instance of this should really exist
-	// Perspectives could be created for specific purposes, but those
-	// do not involve copy/move.
+	// The frontend owns the builder thread, the mempool, and a handle to
+	// the backend; a single instance per chain is the intended usage.
 	BlockchainFrontend(BlockchainFrontend const&) = delete;
 	BlockchainFrontend(BlockchainFrontend&&) = delete;
 
