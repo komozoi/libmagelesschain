@@ -186,7 +186,7 @@ LibMagelessChain keeps a strict split between the **Frontend** (mempool, specula
 
 ### Indexes and Segments
 
-- Each application index inherits from `SegmentedIndex` and implements `writeSegment`, `readSegment`,
+- Each application index inherits from `BlockchainIndex` and implements `writeSegment`, `readSegment`,
   `mergeSegments`, and `encodingVersion`.
 - Segment payload *contents* are application-owned and may use any encoding the index chooses.
 - Segment *framing* (location, checksum, length, catalog entry) is library-owned.
