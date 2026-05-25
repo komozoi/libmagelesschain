@@ -21,11 +21,12 @@
 #include <cstring>
 
 #include "storage/IndexContainerManager.h"
+#include "ds/ArrayList.h"
 #include "universaltime.h"
 
 /*
- * Direct unit tests for IndexContainer + IndexContainerManager: payload
- * round-trip, free-region reuse, container caching, and persistence of
+ * Direct unit tests for IndexContainerManager: payload round-trip,
+ * automatic container selection, free-region reuse, and persistence of
  * written data across manager re-opens.
  */
 
@@ -52,70 +53,89 @@ protected:
 
 TEST_F(ContainerManagerTest, WriteReadRoundTrip) {
 	IndexContainerManager mgr(testDir);
-	IndexContainer* c = mgr.get(0, 0, 0);
-	ASSERT_NE(c, nullptr);
 
 	Bytestring in = makePayload("hello, segments");
-	uint64_t offset = c->writePayload(in);
-	IndexContainer::PayloadView view = c->mmapPayload(offset, in.size());
+	IndexContainerManager::WriteResult wr = mgr.write(in);
+	EXPECT_EQ(wr.length, in.size());
+	EXPECT_GT(wr.containerId, 0u);
 
+	IndexContainer::PayloadView view = mgr.mmapPayload(wr.containerId, wr.offset, wr.length);
 	ASSERT_EQ(view.length, in.size());
 	EXPECT_EQ(memcmp(&in[0], view.data, in.size()), 0);
 }
 
-TEST_F(ContainerManagerTest, CachingReturnsSameInstance) {
+TEST_F(ContainerManagerTest, ManyPayloadsPackIntoSingleContainer) {
 	IndexContainerManager mgr(testDir);
-	IndexContainer* a = mgr.get(0, 0, 0);
-	IndexContainer* b = mgr.get(0, 0, 0);
-	EXPECT_EQ(a, b);
-}
-
-TEST_F(ContainerManagerTest, DistinctCoordsDistinctContainers) {
-	IndexContainerManager mgr(testDir);
-	IndexContainer* a = mgr.get(0, 0, 0);
-	IndexContainer* b = mgr.get(0, 1, 0);
-	IndexContainer* c = mgr.get(1, 0, 0);
-	EXPECT_NE(a, b);
-	EXPECT_NE(a, c);
-	EXPECT_NE(b, c);
+	// 10 small payloads should all land in the first allocated
+	// container; the manager only rolls over when the per-container
+	// 2 GiB cap is reached.
+	ArrayList<IndexContainerManager::WriteResult> results;
+	for (int i = 0; i < 10; ++i) {
+		Bytestring in = makePayload("payloadXYZ");
+		results.add(mgr.write(in));
+	}
+	uint64_t firstId = results.get(0).containerId;
+	for (int i = 1; i < results.size(); ++i) {
+		EXPECT_EQ(results.get(i).containerId, firstId);
+	}
+	EXPECT_EQ(mgr.containerCount(), 1);
 }
 
 TEST_F(ContainerManagerTest, PayloadPersistsAcrossReopen) {
 	Bytestring in = makePayload("durable segment payload");
-	uint64_t off = 0;
-	uint64_t len = in.size();
+	IndexContainerManager::WriteResult wr{};
 	{
 		IndexContainerManager mgr(testDir);
-		IndexContainer* c = mgr.get(0, 0, 0);
-		off = c->writePayload(in);
+		wr = mgr.write(in);
 	}
 	{
 		IndexContainerManager mgr(testDir);
-		IndexContainer* c = mgr.get(0, 0, 0);
-		IndexContainer::PayloadView view = c->mmapPayload(off, len);
-		ASSERT_EQ(view.length, len);
-		EXPECT_EQ(memcmp(&in[0], view.data, len), 0);
+		IndexContainer::PayloadView view = mgr.mmapPayload(wr.containerId, wr.offset, wr.length);
+		ASSERT_EQ(view.length, in.size());
+		EXPECT_EQ(memcmp(&in[0], view.data, in.size()), 0);
+		// Existing container is rediscovered on reopen.
+		EXPECT_GE(mgr.containerCount(), 1);
 	}
 }
 
 TEST_F(ContainerManagerTest, FreeRegionDoesNotCorruptOtherPayloads) {
 	IndexContainerManager mgr(testDir);
-	IndexContainer* c = mgr.get(0, 0, 0);
 	Bytestring a = makePayload("AAAA");
 	Bytestring b = makePayload("BBBB");
-	uint64_t offA = c->writePayload(a);
-	uint64_t offB = c->writePayload(b);
 
-	c->freeRegion(offA, a.size());
+	IndexContainerManager::WriteResult wa = mgr.write(a);
+	IndexContainerManager::WriteResult wb = mgr.write(b);
+	EXPECT_EQ(wa.containerId, wb.containerId); // packed together
+
+	mgr.freeRegion(wa.containerId, wa.offset, wa.length);
+
 	// B must still be intact after A's region is released.
-	IndexContainer::PayloadView view = c->mmapPayload(offB, b.size());
+	IndexContainer::PayloadView view = mgr.mmapPayload(wb.containerId, wb.offset, wb.length);
 	ASSERT_EQ(view.length, b.size());
 	EXPECT_EQ(memcmp(&b[0], view.data, b.size()), 0);
 }
 
 TEST_F(ContainerManagerTest, RefusesEmptyPayload) {
 	IndexContainerManager mgr(testDir);
-	IndexContainer* c = mgr.get(0, 0, 0);
 	Bytestring empty;
-	EXPECT_THROW(c->writePayload(empty), std::invalid_argument);
+	EXPECT_THROW(mgr.write(empty), std::invalid_argument);
+}
+
+TEST_F(ContainerManagerTest, MultiplePayloadsFromDifferentLogicalIndexesShareContainer) {
+	// The manager has no notion of which (typeId, instanceId) a payload
+	// belongs to; payloads from any source share containers freely.
+	// All that matters is that each (containerId, offset, length)
+	// uniquely identifies the bytes.
+	IndexContainerManager mgr(testDir);
+	Bytestring a = makePayload("from index 0");
+	Bytestring b = makePayload("from index 1");
+
+	IndexContainerManager::WriteResult wa = mgr.write(a);
+	IndexContainerManager::WriteResult wb = mgr.write(b);
+	EXPECT_EQ(wa.containerId, wb.containerId);
+
+	IndexContainer::PayloadView va = mgr.mmapPayload(wa.containerId, wa.offset, wa.length);
+	IndexContainer::PayloadView vb = mgr.mmapPayload(wb.containerId, wb.offset, wb.length);
+	EXPECT_EQ(memcmp(&a[0], va.data, a.size()), 0);
+	EXPECT_EQ(memcmp(&b[0], vb.data, b.size()), 0);
 }

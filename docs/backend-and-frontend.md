@@ -108,8 +108,10 @@ instance of type `T` with that `id` was registered by `ChainDesign`.
   files indexed by epoch id.
 - `catalog`: `sp<Catalog>` recording every segment's metadata under
   `dataDir/catalog/`.
-- `containerManager`: `sp<IndexContainerManager>` owning the per-index
-  payload files under `dataDir/indexes/`.
+- `containerManager`: `sp<IndexContainerManager>` owning the packed
+  segment containers under `dataDir/indexes/`. Each container is a
+  `FreeSpaceFile` capped near 2 GiB that may hold payloads from many
+  different indexes side-by-side.
 
 The backend never spawns threads. Threshold-driven compaction runs
 inline inside `addBlock` and the merge order is deterministic (smallest
@@ -122,8 +124,8 @@ Application-level persistent threading lives in the frontend.
 dataDir/
     metadata.bin
     epochs/    *.bin   journal, fsync'd, source of truth
-    catalog/   catalog.bin   not fsync'd
-    indexes/   <type>-<instance>-<container>.bin   not fsync'd
+    catalog/   toc.bin + files/<id>.bin   multi-file, not fsync'd
+    indexes/   <containerId>.bin          packed FreeSpaceFile containers, not fsync'd
 ```
 
 Only the journal is `fsync`'d. Anything under `catalog/` or `indexes/`

@@ -144,12 +144,6 @@ After commit:
 
 These are unfinished work, not contracts; the public API will not change.
 
-- `Catalog` is currently a single append-only `catalog.bin` replayed into
-  RAM as a sorted `ArrayList<SegmentLocator>`. Removals rewrite the file.
-  The concrete proposal calls for a top-level table-of-contents BTree
-  pointing at per-block-range catalog files with a 256-bit bloom bitmask
-  per file. The public `Catalog` API is shaped so callers do not need to
-  change when this swap lands.
 - Compaction runs inline on the commit thread; libexcessive's
   `ThreadPool` will take over once concurrency hazards are scoped.
 - `TimeIndex` (a library-provided `BlockchainIndex` for time-window

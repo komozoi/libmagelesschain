@@ -93,10 +93,11 @@ TEST_F(SegmentOrchestrationTest, BlockCommitCreatesSegmentAndCatalogEntry) {
 	ASSERT_GE(blk, 0);
 	EXPECT_EQ(backend.getBlockHeight(), 1);
 
-	// Catalog file should exist.
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/catalog.bin"));
-	// Container file for typeId=0, instanceId=0, containerId=0.
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/indexes/0-0-0.bin"));
+	// Catalog TOC + at least one catalog file should exist.
+	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/toc.bin"));
+	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/files/1.bin"));
+	// First container file.
+	EXPECT_TRUE(std::filesystem::exists(testDir + "/indexes/1.bin"));
 
 	// In-RAM index reflects the applied transactions.
 	sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
@@ -189,7 +190,7 @@ TEST_F(SegmentOrchestrationTest, EmptyBlockEmitsNoSegment) {
 	// that the catalog stays empty when no commits happen.
 	BlockchainBackend backend(logger, testDir, design, fastConfig());
 	EXPECT_EQ(backend.getBlockHeight(), 0);
-	EXPECT_FALSE(std::filesystem::exists(testDir + "/indexes/0-0-0.bin"));
+	EXPECT_FALSE(std::filesystem::exists(testDir + "/indexes/1.bin"));
 }
 
 TEST_F(SegmentOrchestrationTest, JournalAndSegmentsCoexist) {
@@ -198,8 +199,9 @@ TEST_F(SegmentOrchestrationTest, JournalAndSegmentsCoexist) {
 	ASSERT_GE(writeBlock(backend, 5, 7), 0);
 
 	EXPECT_TRUE(std::filesystem::exists(testDir + "/epochs/0.bin"));
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/catalog.bin"));
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/indexes/0-0-0.bin"));
+	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/toc.bin"));
+	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/files/1.bin"));
+	EXPECT_TRUE(std::filesystem::exists(testDir + "/indexes/1.bin"));
 
 	// Journal is still readable (used by time-window queries, ID lookup).
 	ArrayList<sp<Transaction>> txs = backend.getBlock(0);

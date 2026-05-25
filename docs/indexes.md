@@ -155,10 +155,16 @@ dataDir/
         1.bin
         ...
     catalog/
-        catalog.bin           append-only log of SegmentLocator records
-                              (rewritten on remove)
+        toc.bin               table-of-contents: per catalog-file metadata
+                              (block range, segment count, payload size,
+                              256-bit bloom over (typeId, instanceId))
+        files/
+            <fileId>.bin      sorted log of SegmentLocator records; one
+                              file per ~2 GiB of catalogued payload
     indexes/
-        <type>-<instance>-<container>.bin   per-index segment containers
+        <containerId>.bin     packed segment containers; each file may
+                              hold payloads from many different indexes
+                              side-by-side, capped near 2 GiB
 ```
 
 The catalog and the index containers are **not** `fsync`'d. The journal
@@ -174,13 +180,6 @@ future segment writes can reuse the space.
 
 ## Remaining work
 
-- **Table-of-contents + multi-file catalog**: the current catalog is a
-  single `catalog.bin` replayed into RAM as a sorted ArrayList; removes
-  rewrite the file. The concrete proposal calls for a top-level TOC
-  BTree pointing at per-block-range catalog files with a 256-bit
-  bloom-style bitmask per file. The public API (`Catalog::insert`,
-  `Catalog::remove`, `Catalog::rangeScan`) is shaped so the swap is
-  invisible to callers.
 - **TimeIndex**: a library-provided `BlockchainIndex` subclass for
   time-window queries (with the frontend's mempool tail merged in). For
   now `BlockchainBackend::getTransactionsByTimeWindow` still scans the

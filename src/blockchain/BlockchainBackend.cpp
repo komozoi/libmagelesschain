@@ -210,12 +210,14 @@ void BlockchainBackend::sealOverrideToSegments(StateOverride& state, uint64_t bl
 		uint16_t persistentTypeId = (uint16_t)i;
 		uint8_t instanceId = e.id;
 
-		// Persist the payload through the container, then catalog it.
-		// The index will discover the new segment lazily on its next
-		// query by range-scanning the catalog and mmaping the payload
-		// from the container on demand.
-		IndexContainer* container = containerManager.mut().get(persistentTypeId, instanceId, 0);
-		uint64_t offset = container->writePayload(payload);
+		// Persist the payload through the container manager, then
+		// catalog it.  The container manager picks a destination
+		// container that won't blow the per-container size cap; the
+		// returned WriteResult is exactly the (containerId, offset,
+		// length) triple the locator needs.  The index will discover
+		// the new segment lazily on its next query by range-scanning
+		// the catalog and mmaping the payload from the container.
+		IndexContainerManager::WriteResult wr = containerManager.mut().write(payload);
 
 		SegmentLocator loc = {};
 		loc.persistentTypeId = persistentTypeId;
@@ -224,9 +226,9 @@ void BlockchainBackend::sealOverrideToSegments(StateOverride& state, uint64_t bl
 		loc.mergeGeneration = 0;
 		loc.blockRangeStart = blockNumber;
 		loc.blockRangeEnd = blockNumber;
-		loc.containerId = 0;
-		loc.byteOffset = offset;
-		loc.byteLength = (uint64_t)payload.size();
+		loc.containerId = wr.containerId;
+		loc.byteOffset = wr.offset;
+		loc.byteLength = wr.length;
 		loc.checksum = (uint64_t)excessiveFastHash(&payload[0], payload.size());
 		catalog.mut().insert(loc);
 
@@ -265,8 +267,6 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	sp<BlockchainIndex> idx = indexes.getIndexAt(persistentTypeId);
 	if (!idx) return;
 
-	IndexContainer* container = containerManager.mut().get(persistentTypeId, instanceId, 0);
-
 	// Ask the index to merge the input segments.  The index uses its
 	// attached catalog + container to mmap each input on demand and
 	// returns the combined payload.  An empty return aborts the merge.
@@ -277,7 +277,10 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	Bytestring merged = idx->mergeSegments(mergeInputs);
 	if (merged.size() == 0) return;
 
-	uint64_t mergedOffset = container->writePayload(merged);
+	// Container manager picks a destination container for the merged
+	// output; it may or may not be the same container the inputs lived
+	// in, since they could have been packed across multiple containers.
+	IndexContainerManager::WriteResult mergedWr = containerManager.mut().write(merged);
 
 	SegmentLocator out = {};
 	out.persistentTypeId = persistentTypeId;
@@ -286,19 +289,19 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	out.mergeGeneration = (a.mergeGeneration > b.mergeGeneration ? a.mergeGeneration : b.mergeGeneration) + 1;
 	out.blockRangeStart = (a.blockRangeStart < b.blockRangeStart) ? a.blockRangeStart : b.blockRangeStart;
 	out.blockRangeEnd = (a.blockRangeEnd > b.blockRangeEnd) ? a.blockRangeEnd : b.blockRangeEnd;
-	out.containerId = 0;
-	out.byteOffset = mergedOffset;
-	out.byteLength = (uint64_t)merged.size();
+	out.containerId = mergedWr.containerId;
+	out.byteOffset = mergedWr.offset;
+	out.byteLength = mergedWr.length;
 	out.checksum = (uint64_t)excessiveFastHash(&merged[0], merged.size());
 	catalog.mut().insert(out);
 
 	// Delete the input catalog entries and return their disk regions to
-	// the container's FreeSpaceFile.  The merged output authoritatively
-	// covers the combined block range of its inputs.
+	// the owning container's FreeSpaceFile.  The merged output now
+	// authoritatively covers the combined block range of its inputs.
 	catalog.mut().remove(a);
 	catalog.mut().remove(b);
-	container->freeRegion(a.byteOffset, a.byteLength);
-	container->freeRegion(b.byteOffset, b.byteLength);
+	containerManager.mut().freeRegion(a.containerId, a.byteOffset, a.byteLength);
+	containerManager.mut().freeRegion(b.containerId, b.byteOffset, b.byteLength);
 
 	(void)currentBlock;
 	log.debug("Compacted index typeId=%u id=%u: merged segments [%lu,%lu] and [%lu,%lu] into [%lu,%lu] gen=%u",

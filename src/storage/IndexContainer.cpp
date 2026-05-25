@@ -36,16 +36,19 @@ uint64_t IndexContainer::writePayload(const Bytestring& payload) {
 	if (payload.size() == 0)
 		throw std::invalid_argument("IndexContainer: refusing to write empty payload");
 
+	std::lock_guard _(writeMutex);
+
 	uint32_t length = (uint32_t)payload.size();
 	off_t offset = file.getFreeRegion(length);
-	if (offset + length > 2047 * 1024 * 1024) {
+	if ((uint64_t)offset + length > MAX_CONTAINER_BYTES) {
+		// Container manager is supposed to gate this; if we land here a
+		// caller chose a container that cannot fit the payload.
 		file.markFreeRegion(offset, length);
-		throw std::invalid_argument("Cannot allocate enough bytes to this index container.  This is a severe bug, please report this to LibMagelessChain maintainers.");
+		throw std::overflow_error("IndexContainer::writePayload would exceed MAX_CONTAINER_BYTES; caller picked the wrong container");
 	}
 
-	// Bytestring stores raw bytes; operator[] gives byte access.
 	FdHandle& fd = file.getFile();
-	fd.seek((off_t)offset, SEEK_SET);
+	fd.seek(offset, SEEK_SET);
 	fd.write(&payload[0], length);
 
 	return (uint64_t)offset;
@@ -74,6 +77,7 @@ IndexContainer::PayloadView IndexContainer::mmapPayload(uint64_t offset, uint64_
 }
 
 void IndexContainer::freeRegion(uint64_t offset, uint64_t length) {
+	std::lock_guard _(writeMutex);
 	file.markFreeRegion((off_t)offset, (uint32_t)length);
 }
 

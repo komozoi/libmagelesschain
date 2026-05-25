@@ -57,8 +57,7 @@ static bool readLatestSegment(const BlockchainIndex& self, Catalog* cat, IndexCo
 	if (pick.encodingVersion != self.encodingVersion()) return false;
 	if (pick.byteLength < 8) return false;
 
-	IndexContainer* container = mgr->get(pick.persistentTypeId, pick.instanceId, pick.containerId);
-	IndexContainer::PayloadView view = container->mmapPayload(pick.byteOffset, pick.byteLength);
+	IndexContainer::PayloadView view = mgr->mmapPayload(pick.containerId, pick.byteOffset, pick.byteLength);
 	if (!view.data) return false;
 	std::memcpy(&outSum, view.data, 4);
 	std::memcpy(&outCount, view.data + 4, 4);
@@ -95,8 +94,7 @@ Bytestring TestSumIndex::mergeSegments(const ArrayList<SegmentLocator>& inputs) 
 		}
 	}
 	const SegmentLocator& pick = inputs.get(pickIdx);
-	IndexContainer* container = attachedContainers->get(pick.persistentTypeId, pick.instanceId, pick.containerId);
-	IndexContainer::PayloadView view = container->mmapPayload(pick.byteOffset, pick.byteLength);
+	IndexContainer::PayloadView view = attachedContainers->mmapPayload(pick.containerId, pick.byteOffset, pick.byteLength);
 	if (!view.data) return Bytestring();
 	return Bytestring((void*)view.data, (size_t)view.length);
 }

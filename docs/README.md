@@ -5,9 +5,11 @@ index-centric architectural core (typed registries, `ChainDesign`,
 `StateOverride`, the reshaped `Transaction`, Backend/Frontend/MEVBuilder)
 and the segment storage layer (`Catalog`, `IndexContainerManager`, the
 `BlockchainIndex` segment lifecycle, threshold-driven compaction) are
-implemented. A handful of refinements remain (multi-file catalog with
-table-of-contents and bloom bitmask, `TimeIndex`, parallel compaction,
-index-degraded recovery); each is called out where relevant.
+implemented, including the multi-file catalog with a table-of-contents
+BTree and a 256-bit bloom bitmask per catalog file, and packed
+`FreeSpaceFile`-backed containers shared across indexes. A handful of
+refinements remain (`TimeIndex`, parallel compaction via `ThreadPool`,
+crash-time index-degraded recovery); each is called out where relevant.
 
 For the high-level pitch and the five-minute "Try it" example, see the
 top-level [`README.md`](../README.md). For the in-progress next-phase plan,

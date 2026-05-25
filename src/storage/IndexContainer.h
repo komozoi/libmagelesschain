@@ -20,6 +20,7 @@
 #define LIBMAGELESSCHAIN_INDEXCONTAINER_H
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "fs/FreeSpaceFile.h"
@@ -27,30 +28,38 @@
 #include "ds/Bytestring.h"
 
 /*
- * A single on-disk file holding one or more segment payloads belonging to
- * one index instance.  The library decides where the payload bytes live;
- * the index controls only what is inside them.
+ * A single on-disk file holding segment payloads.  Containers are
+ * pure storage: a container is keyed only by `containerId` and may
+ * hold payloads belonging to many different indexes side-by-side.
  *
- * Region management is delegated to libexcessive's FreeSpaceFile, so freed
- * regions (from merged-out segments) can be reused by future writes inside
- * the same container.
- *
- * One container file per (persistentTypeId, instanceId, containerId),
- * so segments from different indexes are siloed in different files.
- * The current implementation keeps a single container per instance
- * (containerId 0); the API is containerId-aware so size-threshold
- * rollover can plug in by writing into a new containerId.
+ * Region management is delegated to libexcessive's FreeSpaceFile, so
+ * regions freed by compaction can be reused by subsequent writes inside
+ * the same container.  The hard cap per container is the per-container
+ * 2 GiB ceiling (`MAX_CONTAINER_BYTES`), kept below the 2 GiB signed
+ * file-size limit common to mmap/Java consumers.
  */
 class IndexContainer {
 public:
+	/*
+	 * Per-container 2047 MiB ceiling.  IndexContainerManager picks a
+	 * container such that approximateUsedBytes() + payload.size() stays
+	 * under this number.
+	 */
+	static constexpr uint64_t MAX_CONTAINER_BYTES = 2047ull * 1024ull * 1024ull;
+
 	/*
 	 * Open or create a container file at the given path.
 	 */
 	explicit IndexContainer(const std::string& filePath);
 
 	/*
-	 * Allocate a region of `payload.size()` bytes, write the payload to it,
-	 * and return the byte offset where the payload lives.
+	 * Allocate a region of `payload.size()` bytes via FreeSpaceFile,
+	 * write the payload to it, and return the byte offset where the
+	 * payload lives.  Caller is responsible for not selecting a
+	 * container that would exceed MAX_CONTAINER_BYTES.
+	 *
+	 * This method takes the container's internal mutex; concurrent
+	 * writes to the same container are serialized.
 	 */
 	uint64_t writePayload(const Bytestring& payload);
 
@@ -67,9 +76,9 @@ public:
 	};
 
 	/*
-	 * Memory-map `length` bytes at `offset`.  The returned PayloadView's
-	 * `data` pointer is valid for `length` bytes and lives as long as the
-	 * view does.
+	 * Memory-map `length` bytes at `offset`.  Multiple readers may map
+	 * concurrently; the underlying FdHandle's mmap call is not guarded
+	 * by the container mutex.
 	 */
 	PayloadView mmapPayload(uint64_t offset, uint64_t length);
 
@@ -80,14 +89,15 @@ public:
 	void freeRegion(uint64_t offset, uint64_t length);
 
 	/*
-	 * Approximate end-of-allocated-data offset, used for size-threshold
-	 * rollover decisions.  Cheap: the current file size after the last
-	 * allocation.
+	 * Approximate end-of-allocated-data offset.  Cheap (file size); does
+	 * not subtract freed regions, so it is an upper bound on used bytes.
+	 * Used by IndexContainerManager for the per-container size cap.
 	 */
 	uint64_t approximateUsedBytes();
 
 private:
 	FreeSpaceFile file;
+	std::mutex writeMutex;
 };
 
 #endif //LIBMAGELESSCHAIN_INDEXCONTAINER_H
