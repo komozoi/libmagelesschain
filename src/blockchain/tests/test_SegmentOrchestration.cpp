@@ -47,7 +47,7 @@ protected:
 	void SetUp() override {
 		uint64_t seconds = millis_since_epoch() / 1000;
 		std::string testName = ::testing::UnitTest::GetInstance()->current_test_info()->name();
-		testDir = "cmake-build-debug/test_data/" + std::to_string(seconds) + "-SegOrch-" + testName;
+		testDir = "test_data/" + std::to_string(seconds) + "-SegOrch-" + testName;
 		std::filesystem::create_directories(testDir);
 		design = sp<ChainDesign>(sp<TestChainDesign>::create());
 	}

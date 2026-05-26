@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 #include <filesystem>
+#include <Logger.h>
 
 #include "storage/Catalog.h"
 #include "storage/CatalogFile.h"
@@ -38,15 +39,15 @@ protected:
 	void SetUp() override {
 		uint64_t seconds = millis_since_epoch() / 1000;
 		std::string testName = ::testing::UnitTest::GetInstance()->current_test_info()->name();
-		testDir = "cmake-build-debug/test_data/" + std::to_string(seconds) + "-Catalog-" + testName;
+		testDir = "test_data/" + std::to_string(seconds) + "-Catalog-" + testName;
 		std::filesystem::create_directories(testDir);
-		executor = new ThreadPool(2);
+		executor = new ThreadPool(8);
 	}
 
 	void TearDown() override {
 		delete executor;
 		executor = nullptr;
-		if (!testDir.empty() && std::filesystem::exists(testDir))
+		if (!HasFailure() && !testDir.empty() && std::filesystem::exists(testDir))
 			std::filesystem::remove_all(testDir);
 	}
 
@@ -54,6 +55,19 @@ protected:
 		uint8_t* tmp = new uint8_t[size];
 		for (size_t i = 0; i < size; ++i) tmp[i] = (uint8_t)(marker + i);
 		Bytestring buf((void*)tmp, size);
+		delete[] tmp;
+		return buf;
+	}
+
+	static Bytestring makeLargePayload(uint8_t marker, size_t size = 368 * 1024 * 1024) {
+		uint8_t* tmp = new uint8_t[size];
+		uint64_t mixer = 0x783a1d9e27d46172 * (marker + 97);
+		for (size_t i = 0; i < size; ++i) {
+			tmp[i] = (uint8_t)(mixer >> (mixer % 56));
+			mixer *= 0xd3017b2483f3979a;
+		}
+
+		Bytestring buf(tmp, size);
 		delete[] tmp;
 		return buf;
 	}
@@ -95,13 +109,14 @@ TEST_F(CatalogTest, EmptyCatalogReturnsNoFiles) {
 
 TEST_F(CatalogTest, WrittenSegmentIsRetrievable) {
 	Catalog cat(testDir, *executor);
-	cat.writeSegment(/*indexId=*/0, /*version=*/1, /*mergeGen=*/0, /*start=*/0, /*end=*/1, makePayload(7));
+	cat.writeSegment(0, 1, 0, 0, 1, makePayload(7));
 
 	// Spin until the background write reaches the catalog.
 	int seen = 0;
 	for (int spin = 0; spin < 200 && seen == 0; ++spin) {
 		seen = countSegments(cat, 0);
-		if (seen == 0) usleep(5000);
+		if (seen == 0)
+			usleep(5000);
 	}
 	EXPECT_EQ(seen, 1);
 }
@@ -119,6 +134,46 @@ TEST_F(CatalogTest, MultipleSegmentsRetrievable) {
 	}
 	EXPECT_EQ(seen, 5);
 }
+
+
+/*TEST_F(CatalogTest, MultipleSegmentsRetrievableLargePayloads) {
+	Catalog cat(testDir, *executor);
+
+	ArrayList<Bytestring> payloads;
+	for (uint64_t b = 0; b < 5; ++b)
+		payloads.add(makeLargePayload((uint8_t)b));
+	for (uint64_t b = 0; b < 5; ++b)
+		cat.writeSegment(0, 1, 0, b, b + 1, std::move(payloads.get(b)));
+
+	int seen = 0;
+	for (int spin = 0; spin < 200 && seen < 5; ++spin) {
+		seen = countSegments(cat, 0);
+		if (seen < 5) usleep(5000);
+	}
+	EXPECT_EQ(seen, 5);
+}
+
+
+TEST_F(CatalogTest, MultipleSegmentsRetrievableHugePayloads) {
+	Logger logger("test_logs1", LOG_LEVEL_DEBUG, LOG_LEVEL_DEBUG);
+	LogEndpoint log(logger, "test");
+	Catalog cat(testDir, *executor);
+	ArrayList<Bytestring> payloads;
+	for (uint64_t b = 0; b < 5; ++b)
+		payloads.add(makeLargePayload((uint8_t)b, 1024 * 1024 * 1024));
+	for (uint64_t b = 0; b < 5; ++b) {
+		log.info("Writing segment...");
+		cat.writeSegment(0, 1, 0, b, b + 1, std::move(payloads.get(b)));
+		log.info("Done writing segment.");
+	}
+
+	int seen = 0;
+	for (int spin = 0; spin < 200 && seen < 5; ++spin) {
+		seen = countSegments(cat, 0);
+		if (seen < 5) usleep(5000);
+	}
+	EXPECT_EQ(seen, 5);
+}*/
 
 
 TEST_F(CatalogTest, CrossIndexIsolation) {
@@ -183,7 +238,7 @@ TEST_F(CatalogTest, SegmentsSurviveReopen) {
 TEST_F(CatalogTest, PayloadRoundTripsThroughReader) {
 	Catalog cat(testDir, *executor);
 	Bytestring expected = makePayload(0x42, 16);
-	cat.writeSegment(7, 1, 0, 100, 101, expected);
+	cat.writeSegment(7, 1, 0, 100, 101, Bytestring(expected));
 
 	uint8_t observed[16] = {};
 	bool found = false;

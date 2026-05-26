@@ -210,7 +210,7 @@ void BlockchainBackend::sealOverrideToSegments(StateOverride& state, uint64_t bl
 		// background via the executor.  Indexes pick up the new segment
 		// lazily on their next query through Catalog::rangeScan +
 		// CatalogFile::openForReading.
-		catalog.mut().writeSegment((uint16_t)i, idx->encodingVersion(), 0, blockNumber, blockNumber + 1, payload);
+		catalog.mut().writeSegment((uint16_t)i, idx->encodingVersion(), 0, blockNumber, blockNumber + 1, std::move(payload));
 	}
 }
 

@@ -79,7 +79,7 @@ static sp<CatalogFile> buildCatalogFile(const FdHandle& fd) {
  * (the per-file BTrees stay on disk and are queried lazily).
  */
 Catalog::Catalog(const std::string& catalogDir, ThreadPool& executor)
-	: catalogDir(catalogDir), catalogCache(catalogDir, buildCatalogFile), executor(executor) {
+	: catalogDir(catalogDir), catalogCache(catalogDir, buildCatalogFile), executor(executor), filesBeingWritten(64) {
 	// Deliberately ignore errors.
 	mkdir(catalogDir.c_str(), 0770);
 
@@ -93,23 +93,37 @@ sp<CatalogFile> Catalog::getCatalogFile(uint64_t fileId) {
 }
 
 
-void Catalog::writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, const Bytestring& content) {
+void Catalog::writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, Bytestring&& content) {
 	catalog_contents_entry_t key;
 	sp<CatalogFile> file = selectFileFor(indexId, startBlock, endBlock, content.size(), key);
 	if (!file)
 		throw std::runtime_error("Unable to find a catalog file to write a segment too.  Errno: " + std::string(strerror(errno)));
 
+	{
+		std::unique_lock _(beingWrittenMutex);
+		filesBeingWritten.add(file.get());
+	}
+
 	executor.submit([this, indexId, version, mergeGeneration, startBlock, endBlock, content, file, key]() mutable {
-		file.mut().createEntry(indexId, version, mergeGeneration, startBlock, endBlock, content);
+		try {
+			file.mut().createEntry(indexId, version, mergeGeneration, startBlock, endBlock, content);
 
-		key.totalBytes = file->getTotalBytes();
-		key.blockRangeMin = std::min(key.blockRangeMin, startBlock);
-		key.blockRangeMax = std::max(key.blockRangeMax, endBlock);
-		key.bloom = key.bloom | bloomKeyHash(indexId);
-		key.segmentCount++;
+			std::unique_lock _(tocMutex);
+			tocBTree->find(key); // Refresh key with latest data from TOC
+			key.totalBytes = file->getTotalBytes();
+			key.blockRangeMin = std::min(key.blockRangeMin, startBlock);
+			key.blockRangeMax = std::max(key.blockRangeMax, endBlock);
+			key.bloom = key.bloom | bloomKeyHash(indexId);
+			key.segmentCount++;
+			tocBTree->overwrite(key);
+		} catch (const std::exception& rethrown) {
+			std::unique_lock _(beingWrittenMutex);
+			filesBeingWritten.remove(file.get());
+			throw;
+		}
 
-		std::unique_lock _(tocMutex);
-		tocBTree->overwrite(key);
+		std::unique_lock _(beingWrittenMutex);
+		filesBeingWritten.remove(file.get());
 	});
 }
 
@@ -162,6 +176,7 @@ sp<CatalogFile> Catalog::selectFileFor(uint16_t indexId, uint64_t startBlock, ui
 		}
 
 		candidates.sort();
+		std::shared_lock _2(beingWrittenMutex);
 		for (int i = 0; i < candidates.length(); ++i) {
 			sp<CatalogFile> file = catalogCache.open(idToFilename(candidates.at(i)));
 
@@ -169,7 +184,7 @@ sp<CatalogFile> Catalog::selectFileFor(uint16_t indexId, uint64_t startBlock, ui
 			if (!tocBTree->find(key))
 				throw std::runtime_error("Catalog file not found in BTree, despite supposedly being indexed (SEVERE BUG, REPORT THIS!)");
 
-			if (file && !file->isBusy())
+			if (file && !filesBeingWritten.contains(file.get()))
 				return file;
 		}
 	}
@@ -179,11 +194,10 @@ sp<CatalogFile> Catalog::selectFileFor(uint16_t indexId, uint64_t startBlock, ui
 	uint64_t newId = millis_since_epoch();
 	{
 		std::unique_lock _(tocMutex);
-		if (newId == lastFileId)
+		if (newId <= lastFileId)
 			newId++;
 		lastFileId = newId;
-		key = {newId, 0, 0, 0, 0, 0, {}};
-		tocBTree->insert(key);
+		key = {newId, UINT64_MAX, 0, 0, 0, 0, {}};
 	}
 
 	return catalogCache.open(idToFilename(newId), O_RDWR | O_CREAT);

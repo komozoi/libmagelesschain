@@ -24,6 +24,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <ds/HashSet.h>
 
 #include "CustomizableFileCache.h"
 
@@ -116,7 +117,7 @@ public:
 	 * @param endBlock Block after the last block indexed by this segment
 	 * @param content Raw segment bytes to store
 	 */
-	void writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, const Bytestring& content);
+	void writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, Bytestring&& content);
 
 	/**
 	 * Find all catalog files whose block ranges overlap with the given range, and which may have the requested index ID.
@@ -152,6 +153,9 @@ private:
 
 	CustomizableFileCache<CatalogFile> catalogCache;
 	ThreadPool& executor;
+
+	std::shared_mutex beingWrittenMutex;
+	HashSet<void*> filesBeingWritten;
 };
 
 #endif //LIBMAGELESSCHAIN_CATALOG_H

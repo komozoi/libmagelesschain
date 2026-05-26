@@ -68,6 +68,8 @@ public:
 
 		// Attempt to create the accessor
 		sp<T> accessor = builder(handle);
+		if (accessor.pointerType() == UNIQUE)
+			throw std::runtime_error("Accessor pointer cannot be unique - this is a bug.");
 		addRaw(fullPath, handle, accessor);
 
 		return accessor;
@@ -79,9 +81,7 @@ public:
 	}
 
 private:
-	void addRaw(const std::string& path, const FdHandle& file, sp<T> accessor) {
-
-		std::string fullPath = path[0] == '/' ? path : root + path;
+	void addRaw(const std::string& fullPath, const FdHandle& file, sp<T> accessor) {
 
 		if (!file)
 			return;

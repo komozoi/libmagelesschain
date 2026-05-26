@@ -97,11 +97,11 @@ void CatalogFile::createEntry(uint16_t indexId, uint16_t version, uint16_t merge
 		// For this part of the method, it is safe to share the mutex because we're not altering existing on-disk data
 		// that would be read.  We're only writing data to a region of the file, which is not referenced elsewhere yet.
 		std::shared_lock _(rwMutex);
-		fd.queueWrite(&content[0], length, offset);
+		pwrite(fd.getFd(), &content[0], length, offset);
 	}
 
 	// Prepare to add the entry to the segment index
-	uint64_t checksum = excessiveFastHash(&content[0], length);
+	uint64_t checksum = excessiveFastHash(&content[0], length / 8);
 	segment_btree_metadata_t metadata = {startBlock, endBlock, (uint64_t)offset, length, checksum, mergeGeneration, indexId, version};
 
 	{
