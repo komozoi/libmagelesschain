@@ -61,7 +61,7 @@ IndexContainer::PayloadView IndexContainer::mmapPayload(uint64_t offset, uint64_
 	// expose `data` pointing back into the mapping at the original byte.
 	long pageSize = ::sysconf(_SC_PAGESIZE);
 	if (pageSize <= 0) pageSize = 4096;
-	uint64_t alignedOffset = offset & ~(uint64_t)(pageSize - 1);
+	uint64_t alignedOffset = offset&  ~(uint64_t)(pageSize - 1);
 	uint64_t innerOffset = offset - alignedOffset;
 	size_t mappedSize = (size_t)(innerOffset + length);
 

@@ -24,6 +24,26 @@
 #include <ds/Bytestring.h>
 
 
+/**
+ * This ensures that an exception or other unexpected behavior cannot leave the flag set.
+ * This is used to track when a segment is being written to.  That in turn helps select
+ * which catalog segment should be written to next; ideally a catalog file already being
+ * used for writing should not be selected for parallelism reasons.
+ */
+class WriterGuard {
+public:
+	std::atomic<bool>& target;
+
+	WriterGuard(std::atomic<bool>& target) : target(target) {
+		target = true;
+	}
+
+	~WriterGuard() {
+		target = false;
+	}
+};
+
+
 
 MmapHandle CatalogFileReader::openEntry(uint64_t offset, uint64_t size) const {
 	return fd.getMmapHandle(offset, size, PROT_READ);
@@ -39,6 +59,7 @@ CatalogFile::CatalogFile(const FdHandle &fd)
 
 
 void CatalogFile::createEntry(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, const Bytestring& content) {
+	WriterGuard guard(isSegmentBeingWritten);
 	off_t offset;
 	uint32_t length = content.size();
 
@@ -87,4 +108,8 @@ void CatalogFile::deleteEntry(uint16_t indexId, uint64_t startBlock, uint16_t me
 		std::unique_lock _(appendMutex);
 		regions.markFreeRegion(toRemove.byteOffset, toRemove.byteLength);
 	}
+}
+
+uint64_t CatalogFile::getTotalBytes() const {
+	return fd.seek(0, SEEK_END);
 }

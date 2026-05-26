@@ -26,12 +26,33 @@
 #include "IndexContainer.h"
 #include "alloc/pointer.h"
 #include "ds/HashMap.h"
+#include "fs/BTree.h"
+
+/*
+ * Container metadata persisted in `containers.bin` (a BTree keyed by
+ * containerId).  Holds just enough to allocate new ids and rediscover
+ * existing containers without scanning the filesystem.
+ */
+struct ContainerMetaEntry {
+	uint64_t containerId;
+	uint8_t  tombstone;        // unused today, kept for symmetry with CatalogFileEntry
+	uint8_t  reserved[7];
+
+	static int compare(const ContainerMetaEntry& a, const ContainerMetaEntry& b) {
+		if (a.containerId < b.containerId) return -1;
+		if (a.containerId > b.containerId) return 1;
+		return 0;
+	}
+};
 
 /*
  * Pool of IndexContainer files, addressed by a single `containerId`.
  *
  * Layout on disk:
- *   <indexesDir>/<containerId>.bin
+ *   <indexesDir>/containers.bin  BTree<ContainerMetaEntry> indexing the
+ *                                set of allocated containers
+ *   <indexesDir>/<containerId>.bin   one packed FreeSpaceFile per
+ *                                    allocated container
  *
  * Each container is a packed FreeSpaceFile that may hold payloads from
  * many different indexes side-by-side.  Containers are bounded by
@@ -40,10 +61,11 @@
  * within that cap, and creates a new container otherwise.
  *
  * Selection policy on write:
- *   - Walk known containers in containerId order; pick the first one
- *     whose `approximateUsedBytes() + payload.size()` fits under
- *     MAX_CONTAINER_BYTES.
- *   - If none fits, create a new container with a fresh id.
+ *   - Walk known containers in containerId order via the BTree; first
+ *     one whose `approximateUsedBytes() + payload.size()` fits under
+ *     MAX_CONTAINER_BYTES wins.
+ *   - If none fits, allocate a fresh id and persist a new metadata
+ *     entry to the BTree.
  *
  * Concurrency: the manager itself uses a mutex to serialize container
  * selection/creation only.  The actual write into the chosen container
@@ -93,10 +115,12 @@ public:
 	 */
 	int containerCount();
 
+	~IndexContainerManager();
+
 private:
 	IndexContainer* getOrOpen(uint64_t containerId);
 	uint64_t allocateNewContainerId();
-	void scanExistingContainers();
+	void loadKnownContainers();
 
 	std::string indexesDir;
 	std::mutex selectMutex;
@@ -107,9 +131,10 @@ private:
 	// Highest containerId we know exists on disk (whether or not it is
 	// currently open).  New container ids are allocated as this + 1.
 	uint64_t maxKnownContainerId;
-	// Set true after the first scanExistingContainers() so we never
-	// re-scan the directory; the manager is the only writer.
-	bool scanned;
+	// BTree<ContainerMetaEntry> persisting the set of allocated
+	// container ids in `containers.bin`.  Used at startup to rediscover
+	// containers (no directory scanning) and updated on allocation.
+	BTree<ContainerMetaEntry, 31>* containerMetaTree;
 };
 
 #endif //LIBMAGELESSCHAIN_INDEXCONTAINERMANAGER_H

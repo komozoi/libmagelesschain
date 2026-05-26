@@ -20,6 +20,7 @@
 #ifndef LIBMAGELESSCHAIN_CATALOGFILE_H
 #define LIBMAGELESSCHAIN_CATALOGFILE_H
 
+#include <atomic>
 #include <functional>
 #include <shared_mutex>
 #include <fs/FreeSpaceFile.h>
@@ -129,9 +130,13 @@ public:
 	void createEntry(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, const Bytestring& content);
 	void deleteEntry(uint16_t indexId, uint64_t startBlock, uint16_t mergeGeneration);
 
+	bool isBusy() const { return isSegmentBeingWritten.load(); }
+
 	~CatalogFile() {
 		delete segmentIndex;
 	}
+
+	uint64_t getTotalBytes() const;
 
 private:
 	const FdHandle& fd;
@@ -140,6 +145,8 @@ private:
 
 	std::shared_mutex rwMutex;
 	std::shared_mutex appendMutex;
+
+	std::atomic<bool> isSegmentBeingWritten = false;
 };
 
 

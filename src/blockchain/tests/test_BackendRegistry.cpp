@@ -31,7 +31,7 @@ class BackendRegistryProbeA : public BlockchainIndex {
 public:
 	int payload = 0;
 	uint16_t encodingVersion() const override { return 0; }
-	Bytestring mergeSegments(const ArrayList<SegmentLocator>&) const override {
+	Bytestring mergeSegments(const ArrayList<segment_coordinate_t>&) const override {
 		return Bytestring();
 	}
 };
@@ -40,7 +40,7 @@ class BackendRegistryProbeB : public BlockchainIndex {
 public:
 	float payload = 0.0f;
 	uint16_t encodingVersion() const override { return 0; }
-	Bytestring mergeSegments(const ArrayList<SegmentLocator>&) const override {
+	Bytestring mergeSegments(const ArrayList<segment_coordinate_t>&) const override {
 		return Bytestring();
 	}
 };

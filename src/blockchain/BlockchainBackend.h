@@ -31,7 +31,6 @@
 #include "TransactionTypeRegistry.h"
 #include "storage/Catalog.h"
 #include "storage/IndexContainerManager.h"
-#include "storage/SegmentLocator.h"
 #include "alloc/pointer.h"
 #include "ds/ArrayList.h"
 #include "ds/HashMap.h"

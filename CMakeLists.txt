@@ -10,7 +10,7 @@ include(FetchContent)
 FetchContent_Declare(
     excessive
     GIT_REPOSITORY https://gitea.com/komozoi/excessive.git
-    GIT_TAG v0.3.0
+    GIT_TAG master
     GIT_SHALLOW TRUE
 )
 

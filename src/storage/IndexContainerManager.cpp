@@ -18,61 +18,60 @@
 
 #include "IndexContainerManager.h"
 
-#include <dirent.h>
+#include <fcntl.h>
 #include <stdexcept>
 #include <sys/stat.h>
 
+#include "fs/FdHandle.h"
+
 IndexContainerManager::IndexContainerManager(const std::string& indexesDir)
-	: indexesDir(indexesDir), containers(64), maxKnownContainerId(0), scanned(false) {
+	: indexesDir(indexesDir), containers(64), maxKnownContainerId(0),
+	  containerMetaTree(nullptr) {
 	mkdir(indexesDir.c_str(), 0770);
-	scanExistingContainers();
+
+	std::string metaPath = indexesDir + "/containers.bin";
+	FdHandle metaFile = FdHandle::open(metaPath.c_str(), O_RDWR | O_CREAT, 0660);
+	containerMetaTree = new BTree<ContainerMetaEntry, 31>(std::move(metaFile), 0,
+		ContainerMetaEntry::compare);
+
+	loadKnownContainers();
 }
 
-void IndexContainerManager::scanExistingContainers() {
-	if (scanned) return;
-	scanned = true;
+IndexContainerManager::~IndexContainerManager() {
+	delete containerMetaTree;
+}
 
-	DIR* dir = opendir(indexesDir.c_str());
-	if (!dir) return;
-	struct dirent* ent;
-	while ((ent = readdir(dir)) != nullptr) {
-		std::string name(ent->d_name);
-		if (name.size() < 5) continue;
-		if (name.compare(name.size() - 4, 4, ".bin") != 0) continue;
-		// Try to parse the base name as an unsigned integer.  We treat
-		// any non-numeric filename as foreign and skip it; only files we
-		// created (named `<id>.bin`) are tracked here.
-		std::string base = name.substr(0, name.size() - 4);
-		uint64_t id = 0;
-		bool ok = !base.empty();
-		for (char c : base) {
-			if (c < '0' || c > '9') { ok = false; break; }
-			id = id * 10 + (uint64_t)(c - '0');
+/*
+ * Iterate the container metadata BTree in ascending containerId order
+ * and pre-open every container so writes can pick a destination
+ * without paying a syscall-per-open cost.  Container count is bounded
+ * by the 2 GiB-per-container cap so this is small even for long-running
+ * chains.  No filesystem directory scan is involved; the BTree is the
+ * authoritative list of known containers.
+ */
+void IndexContainerManager::loadKnownContainers() {
+	ContainerMetaEntry key = {};
+	key.containerId = 0;
+	while (containerMetaTree->findNext(key)) {
+		if (key.tombstone == 0) {
+			if (key.containerId > maxKnownContainerId)
+				maxKnownContainerId = key.containerId;
+			getOrOpen(key.containerId);
 		}
-		if (!ok) continue;
-		if (id > maxKnownContainerId) maxKnownContainerId = id;
-		// Open lazily; we just need to know it exists for selection.
-		// getOrOpen will do the real work when something needs to use it.
-		(void)id;
-	}
-	closedir(dir);
-
-	// Pre-open every known container so selection can read sizes
-	// without paying a syscall-per-write open cost.  Container count is
-	// small (the 2 GiB cap means a long-running chain holds dozens to
-	// hundreds, not millions).
-	for (uint64_t id = 1; id <= maxKnownContainerId; ++id) {
-		std::string path = indexesDir + "/" + std::to_string(id) + ".bin";
-		struct stat st;
-		if (stat(path.c_str(), &st) == 0) {
-			getOrOpen(id);
-		}
+		if (key.containerId == UINT64_MAX) break;
+		ContainerMetaEntry next = {};
+		next.containerId = key.containerId + 1;
+		key = next;
 	}
 }
 
 uint64_t IndexContainerManager::allocateNewContainerId() {
-	// Caller holds selectMutex.
+	// Caller holds selectMutex.  Persist the new id in the metadata
+	// BTree so future reopens rediscover it without a directory scan.
 	maxKnownContainerId++;
+	ContainerMetaEntry e = {};
+	e.containerId = maxKnownContainerId;
+	containerMetaTree->insert(e);
 	return maxKnownContainerId;
 }
 

@@ -38,7 +38,7 @@ static bool readLatestSegment(const BlockchainIndex& self, Catalog* cat, IndexCo
 	outCount = 0;
 	if (!cat || !mgr) return false;
 
-	ArrayList<SegmentLocator> segs = cat->getAllSegments(typeId, instanceId);
+	ArrayList<segment_btree_metadata_t> segs = cat->getAllSegments(typeId, instanceId);
 	if (segs.size() == 0) return false;
 
 	// Entries are sorted ascending by (blockStart, mergeGeneration).  We
@@ -46,14 +46,14 @@ static bool readLatestSegment(const BlockchainIndex& self, Catalog* cat, IndexCo
 	// blockRangeEnd is largest; on tie the highest mergeGeneration wins.
 	int pickIdx = 0;
 	for (int i = 1; i < segs.size(); ++i) {
-		const SegmentLocator& a = segs.get(pickIdx);
-		const SegmentLocator& b = segs.get(i);
+		const segment_btree_metadata_t& a = segs.get(pickIdx);
+		const segment_btree_metadata_t& b = segs.get(i);
 		if (b.blockRangeEnd > a.blockRangeEnd
 			|| (b.blockRangeEnd == a.blockRangeEnd && b.mergeGeneration > a.mergeGeneration)) {
 			pickIdx = i;
 		}
 	}
-	const SegmentLocator& pick = segs.get(pickIdx);
+	const segment_btree_metadata_t& pick = segs.get(pickIdx);
 	if (pick.encodingVersion != self.encodingVersion()) return false;
 	if (pick.byteLength < 8) return false;
 
@@ -76,7 +76,7 @@ int TestSumIndex::latestCount() const {
 	return count;
 }
 
-Bytestring TestSumIndex::mergeSegments(const ArrayList<SegmentLocator>& inputs) const {
+Bytestring TestSumIndex::mergeSegments(const ArrayList<segment_btree_metadata_t>& inputs) const {
 	// Absolute-state segments: the input with the highest blockRangeEnd
 	// already represents the union of all the input block ranges, so we
 	// just hand its payload back as the merged payload.  Indexes whose
@@ -86,14 +86,14 @@ Bytestring TestSumIndex::mergeSegments(const ArrayList<SegmentLocator>& inputs) 
 
 	int pickIdx = 0;
 	for (int i = 1; i < inputs.size(); ++i) {
-		const SegmentLocator& a = inputs.get(pickIdx);
-		const SegmentLocator& b = inputs.get(i);
+		const segment_btree_metadata_t& a = inputs.get(pickIdx);
+		const segment_btree_metadata_t& b = inputs.get(i);
 		if (b.blockRangeEnd > a.blockRangeEnd
 			|| (b.blockRangeEnd == a.blockRangeEnd && b.mergeGeneration > a.mergeGeneration)) {
 			pickIdx = i;
 		}
 	}
-	const SegmentLocator& pick = inputs.get(pickIdx);
+	const segment_btree_metadata_t& pick = inputs.get(pickIdx);
 	IndexContainer::PayloadView view = attachedContainers->mmapPayload(pick.containerId, pick.byteOffset, pick.byteLength);
 	if (!view.data) return Bytestring();
 	return Bytestring((void*)view.data, (size_t)view.length);

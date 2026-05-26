@@ -19,221 +19,139 @@
 #ifndef LIBMAGELESSCHAIN_CATALOG_H
 #define LIBMAGELESSCHAIN_CATALOG_H
 
-#include <cstdint>
+#include <bigint.h>
+#include <LongKey.h>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 
-#include "SegmentLocator.h"
+#include "CustomizableFileCache.h"
 
-#include "fs/FdHandle.h"
+#include "fs/BTree.h"
 #include "ds/ArrayList.h"
-#include "alloc/pointer.h"
-#include "LongKey.h"
 
 /*
  * Per-file capacity ceiling for a catalog file.  An insert chooses a
  * catalog file such that file.totalBytes + locator.byteLength stays
  * <= CATALOG_FILE_MAX_BYTES; otherwise a new file is allocated.
  *
- * This is the *payload* size accounted for, not the catalog file's own
- * size on disk.  It matches the per-container size cap so a catalog
- * file roughly corresponds to one container's worth of segments and
- * keeps both layers' working sets in the same order of magnitude.
+ * Kept just under 2 GiB so a catalog file roughly corresponds to one
+ * container's worth of segments and stays well below the 2 GiB Java
+ * compatibility threshold.
  */
 constexpr uint64_t CATALOG_FILE_MAX_BYTES = 2047ull * 1024ull * 1024ull;
 
+
 /*
- * Multi-file catalog: a Table-Of-Contents file `toc.bin` and a directory
- * of per-range catalog files `files/<id>.bin`.  Each catalog file holds
- * an append-only log of SegmentLocator records and is kept sorted in
- * RAM by SegmentLocator::compare so range scans short-circuit.  Each
- * catalog file has its own mutex so a multi-threaded writer may route
- * concurrent inserts that resolve to different files in parallel.
+ * Catalog file metadata as stored in the TOC BTree.  One per catalog
+ * file.  Cached per-file stats (bloom, block range, totals) live here
+ * so we never have to open the file to decide whether it is a candidate
+ * for an insert or a query.
+ */
+struct catalog_contents_entry_t {
+	uint64_t fileId;             // primary key
+	uint64_t blockRangeMin;      // UINT64_MAX if empty
+	uint64_t blockRangeMax;      // 0 if empty
+	uint64_t totalBytes;         // sum of live SegmentLocator::byteLength
+	uint256_t bloom;          // 256-bit bloom over (typeId, instanceId)
+	uint32_t segmentCount;       // live (non-tombstoned) segment count
+	uint8_t  reserved[4];
+
+	static int compare(const catalog_contents_entry_t& a, const catalog_contents_entry_t& b);
+};
+
+
+class ThreadPool;
+class CatalogFile;
+class Bytestring;
+
+/*
+ * Multi-file catalog backed by libexcessive's BTree at every level.
  *
- * The TOC keeps one fixed-size record per catalog file with:
- *   - fileId
- *   - block range covered by the segments inside (min start, max end)
- *   - total payload bytes (the sum of locator.byteLength) which is what
- *     the per-file cap is enforced against
- *   - segment count
- *   - a 256-bit bloom-style bitmask over the (persistentTypeId,
- *     instanceId) pairs of segments in the file
+ *   <catalogDir>/toc.bin        BTree<catalog_contents_entry_t> keyed by fileId
+ *   <catalogDir>/<id>.bin       BTree<segment_btree_metadata_t> keyed by
+ *                               (typeId, instanceId, blockRangeStart,
+ *                                mergeGeneration); one per catalog file
  *
- * On insert, the file with the best locality score is chosen, provided
- * its post-insert totalBytes fits under CATALOG_FILE_MAX_BYTES.  The
- * scoring prefers files that already contain the same (typeId, instId)
- * (bloom hit) and whose existing block range is closest to the new
- * segment's block range, which keeps queries cheap by clustering
- * related segments together on disk.  If no existing file qualifies, a
- * new one is allocated.
+ * The TOC's BTree records per-file metadata: covered block range, total
+ * catalogued payload bytes, segment count, and a 256-bit bloom-style
+ * bitmask over the (persistentTypeId, instanceId) pairs of segments
+ * present in that file.  At query time the TOC is iterated via
+ * BTree::findNext (ascending fileId), survivors are filtered by bloom
+ * and block-range overlap, and only the relevant per-file BTrees are
+ * range-scanned.  At insert time the TOC is iterated the same way to
+ * pick the best-locality file under the capacity cap.
  *
- * Neither the TOC nor any catalog file is fsync'd: per the design,
- * the journal is the source of truth and catalogs are rebuildable.
+ * Segments are never removed from a BTree (libexcessive's BTree::remove
+ * only handles leaf nodes); compaction marks segments with the
+ * SegmentLocator::tombstone bit and the BTree entry is rewritten via
+ * BTree::overwrite.  Range scans skip tombstones.  The catalog's
+ * `remove()` does the same.
  *
- * TODO: Stop using linear search and use BTree instead.
+ * Each catalog file has its own mutex so two parallel writers operating
+ * on different files do not contend; concurrent inserts that route to
+ * the same file serialize on its file mutex.  The TOC has its own mutex
+ * for slot lookup / file allocation and is held only briefly.
+ *
+ * Neither the TOC nor any catalog file is fsync'd.
+ * The journal is the source of truth and catalog files are rebuildable.
  */
 class Catalog {
 public:
-	explicit Catalog(const std::string& catalogDir);
-	~Catalog();
+	explicit Catalog(const std::string& catalogDir, ThreadPool& executor);
 
 	Catalog(const Catalog&) = delete;
 	Catalog& operator=(const Catalog&) = delete;
 
-	/*
-	 * Insert a new segment entry into the catalog.  Picks an existing
-	 * file based on capacity + locality, or creates a new file if no
-	 * existing one qualifies.  Appends to the chosen file's on-disk log
-	 * under the file's mutex, and updates the TOC entry under the TOC
-	 * mutex.  Concurrent inserts that route to different files run in
-	 * parallel.
-	 */
-	void insert(const SegmentLocator& entry);
+	sp<CatalogFile> getCatalogFile(uint64_t fileId);
 
-	/*
-	 * Remove a segment entry.  Drops it from the owning file's sorted
-	 * list and rewrites that file's on-disk log so subsequent reopens
-	 * do not see it.  Updates the TOC.  The disk region of the
-	 * segment's payload must be released by the caller via the
-	 * container manager.
+	/**
+	 * Schedules segment write in the thread pool.  Automatically finds a decent catalog to write to, or creates a
+	 * new one if needed.
+	 *
+	 * @param indexId Index ID of the segment
+	 * @param version Index version writing this segment
+	 * @param mergeGeneration Merge generation of this segment
+	 * @param startBlock The first block indexed by this segment
+	 * @param endBlock Block after the last block indexed by this segment
+	 * @param content Raw segment bytes to store
 	 */
-	void remove(const SegmentLocator& entry);
+	void writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, const Bytestring& content);
 
-	/*
-	 * Range scan: return every segment for the given index instance
-	 * whose [blockRangeStart, blockRangeEnd] intersects [startBlock,
-	 * endBlock] (inclusive).  Filters candidate catalog files by their
-	 * TOC bloom + block range overlap, then scans each surviving file.
-	 * Returned in ascending (blockRangeStart, mergeGeneration) order.
+	/**
+	 * Find all catalog files whose block ranges overlap with the given range, and which may have the requested index ID.
+	 *
+	 * @param indexId Index ID to filter for
+	 * @param startBlock
+	 * @param endBlock
+	 * @return
 	 */
-	ArrayList<SegmentLocator> rangeScan(uint16_t persistentTypeId, uint8_t instanceId,
-		uint64_t startBlock, uint64_t endBlock) const;
+	ArrayList<uint64_t> rangeScan(uint16_t indexId, uint64_t startBlock, uint64_t endBlock);
 
-	/*
-	 * Count segments for an index instance (full chain range).
-	 */
-	int countSegments(uint16_t persistentTypeId, uint8_t instanceId) const;
-
-	/*
-	 * All segments for an index instance, ascending
-	 * (blockRangeStart, mergeGeneration).
-	 */
-	ArrayList<SegmentLocator> getAllSegments(uint16_t persistentTypeId, uint8_t instanceId) const;
-
-	/*
-	 * Number of catalog files currently tracked in the TOC.  Useful for
-	 * tests that want to verify rollover behavior.
-	 */
-	int catalogFileCount() const;
+	~Catalog();
 
 private:
-	/*
-	 * In-RAM TOC entry; one per catalog file.  This is exactly what is
-	 * persisted to `toc.bin` after the header.
-	 */
-	struct CatalogFileEntry {
-		uint64_t fileId;
-		uint64_t blockRangeMin;     // min blockRangeStart of segments in file; UINT64_MAX if empty
-		uint64_t blockRangeMax;     // max blockRangeEnd of segments in file; 0 if empty
-		uint64_t totalBytes;        // sum of byteLength across segments
-		uint32_t segmentCount;
-		uint32_t reserved;          // align to 8
-		uint64_t bloomBits[4];      // 256-bit bloom over (typeId, instanceId)
-	};
 
 	/*
-	 * Per-catalog-file slot.  Each slot owns the file handle, the
-	 * in-RAM sorted segment list, and its own mutex.  Slots live inside
-	 * sp<> so the TOC vector can grow without invalidating references
-	 * held by inserts currently in flight on other slots.
+	 * Pick a destination catalog file for `entry` by iterating the
+	 * TOC BTree.
+	 *
+	 * Loads the file metadata for the selected file into `key`.
+	 *
+	 * Will create a file if needed or if other catalog files are busy.
 	 */
-	struct FileSlot {
-		uint64_t fileId;
-		mutable std::mutex fileMutex;
-		ArrayList<SegmentLocator> entries;
-		FdHandle file;
-
-		FileSlot() = default;
-		FileSlot(const FileSlot&) = delete;
-		FileSlot& operator=(const FileSlot&) = delete;
-	};
-
-	/*
-	 * 256-bit bloom helpers.  k=3 bit positions are derived from
-	 * excessiveFastHash over the packed (typeId, instanceId) key.
-	 */
-	static void bloomAdd(uint64_t bits[4], uint16_t persistentTypeId, uint8_t instanceId);
-	static bool bloomMaybeContains(const uint64_t bits[4], uint16_t persistentTypeId, uint8_t instanceId);
-
-	/*
-	 * Distance from a segment's block range to a catalog file's existing
-	 * block range.  Lower is better; an empty file returns 0.
-	 */
-	static uint64_t blockRangeDistance(const CatalogFileEntry& tocEntry, uint64_t segStart, uint64_t segEnd);
-
-	/*
-	 * Pick a destination catalog file id for `entry`.  Returns 0 if a
-	 * new file should be allocated; otherwise the id of an existing
-	 * file.  Caller holds `tocMutex`.
-	 */
-	uint64_t selectFileFor(const SegmentLocator& entry) const;
-
-	/*
-	 * Allocate a brand-new catalog file (TOC entry + on-disk file).
-	 * Caller holds `tocMutex`.  Returns the new fileId.
-	 */
-	uint64_t createFile();
-
-	/*
-	 * Load TOC + every catalog file into memory.  Called from the
-	 * constructor.
-	 */
-	void load();
-
-	/*
-	 * Rewrite the TOC file from the in-RAM tocEntries.  Called when
-	 * stats change.  TOC writes are cheap (one record per catalog
-	 * file).  Caller holds `tocMutex`.
-	 */
-	void rewriteToc();
-
-	/*
-	 * Append one SegmentLocator to a catalog file.  Caller holds
-	 * `slot.fileMutex`.
-	 */
-	static void appendToFile(FileSlot& slot, const SegmentLocator& entry);
-
-	/*
-	 * Replace a catalog file's contents with its in-RAM sorted list.
-	 * Used on remove().  Caller holds `slot.fileMutex`.
-	 */
-	void rewriteFile(FileSlot& slot);
-
-	/*
-	 * Locate the FileSlot that owns the given entry, or return -1 if
-	 * none does.  Caller holds `tocMutex` (read-locked, but this class
-	 * uses a single mutex so any caller is the only TOC reader).
-	 */
-	int findOwningSlot(const SegmentLocator& entry) const;
+	sp<CatalogFile> selectFileFor(uint16_t indexId, uint64_t startBlock, uint64_t endBlock, uint32_t size, catalog_contents_entry_t& key);
 
 	std::string catalogDir;
-	std::string filesDir;
-	std::string tocPath;
 
-	mutable std::mutex tocMutex;
-	/*
-	 * TOC entries are kept in parallel with the slots vector.  Index i
-	 * in `tocEntries` describes the file at `slots[i]`.
-	 */
-	ArrayList<CatalogFileEntry> tocEntries;
-	/*
-	 * FileSlots are heap-allocated and accessed via raw pointers so the
-	 * slot's identity is stable across ArrayList growth (and so we can
-	 * mutate the slot in place without sp<T>'s COW machinery detaching
-	 * a private copy).  Owned by this Catalog; deleted in ~Catalog.
-	 */
-	ArrayList<FileSlot*> slots;
-	uint64_t maxFileId;
+	std::shared_mutex tocMutex;
+	BTree<catalog_contents_entry_t, 31>* tocBTree;
+
+	// This is used to ensure time-based filenames are not duplicated.
+	uint64_t lastFileId;
+
+	CustomizableFileCache<CatalogFile> catalogCache;
+	ThreadPool& executor;
 };
 
 #endif //LIBMAGELESSCHAIN_CATALOG_H

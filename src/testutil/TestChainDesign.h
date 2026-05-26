@@ -41,7 +41,7 @@
 class TestSumIndex : public BlockchainIndex {
 public:
 	uint16_t encodingVersion() const override { return 1; }
-	Bytestring mergeSegments(const ArrayList<SegmentLocator>& inputs) const override;
+	Bytestring mergeSegments(const ArrayList<segment_coordinate_t>& inputs) const override;
 
 	int latestSum() const;
 	int latestCount() const;

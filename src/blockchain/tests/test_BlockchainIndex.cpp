@@ -49,7 +49,7 @@ TEST(BlockchainIndexTest, AttachStoresStorageHandles) {
 
 TEST(BlockchainIndexTest, MergeSegmentsWithNoInputsReturnsEmpty) {
 	TestSumIndex idx;
-	ArrayList<SegmentLocator> empty;
+	ArrayList<segment_coordinate_t> empty;
 	Bytestring merged = idx.mergeSegments(empty);
 	EXPECT_EQ((int)merged.size(), 0);
 }

@@ -123,13 +123,18 @@ Application-level persistent threading lives in the frontend.
 ```
 dataDir/
     metadata.bin
-    epochs/    *.bin   journal, fsync'd, source of truth
-    catalog/   toc.bin + files/<id>.bin   multi-file, not fsync'd
-    indexes/   <containerId>.bin          packed FreeSpaceFile containers, not fsync'd
+    epochs/    *.bin                       journal, fsync'd, source of truth
+    catalog/   toc.bin                     BTree<CatalogFileEntry> keyed by fileId
+               files/<id>.bin              BTree<SegmentLocator> per file
+    indexes/   containers.bin              BTree<ContainerMetaEntry> keyed by containerId
+               <containerId>.bin           packed FreeSpaceFile container
 ```
 
-Only the journal is `fsync`'d. Anything under `catalog/` or `indexes/`
-can be rebuilt from the journal if it is corrupted on restart.
+Every persistent sorted mapping the library owns is a libexcessive
+`BTree`: the TOC, each catalog file's segment list, and the container
+metadata list. No directory scans, no in-RAM segment lists. Only the
+journal is `fsync`'d; anything under `catalog/` or `indexes/` can be
+rebuilt from the journal if it is corrupted on restart.
 
 ## BlockchainFrontend
 

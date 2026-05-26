@@ -22,10 +22,15 @@
 #include <cstdint>
 #include "ds/Bytestring.h"
 #include "ds/ArrayList.h"
-#include "storage/SegmentLocator.h"
 
 class Catalog;
 class IndexContainerManager;
+
+struct segment_coordinate_t {
+	uint64_t fileId;
+	uint64_t offset;
+	uint64_t length;
+};
 
 /*
  * Base interface for an application-defined blockchain index.
@@ -95,7 +100,7 @@ public:
 	 * the highest input, and deletes the inputs (catalog entries + disk
 	 * regions).  Returning an empty Bytestring aborts the merge.
 	 */
-	virtual Bytestring mergeSegments(const ArrayList<SegmentLocator>& inputs) const = 0;
+	virtual Bytestring mergeSegments(const ArrayList<segment_coordinate_t>& inputs) const = 0;
 
 	virtual ~BlockchainIndex() = default;
 

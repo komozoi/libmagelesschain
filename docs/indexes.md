@@ -122,9 +122,8 @@ ArrayList<SegmentLocator> segs = attachedCatalog->rangeScan(
     attachedPersistentTypeId, attachedInstanceId, fromBlock, toBlock);
 for (int i = 0; i < segs.size(); i++) {
     const SegmentLocator& loc = segs.get(i);
-    IndexContainer* c = attachedContainers->get(
-        loc.persistentTypeId, loc.instanceId, loc.containerId);
-    IndexContainer::PayloadView view = c->mmapPayload(loc.byteOffset, loc.byteLength);
+    IndexContainer::PayloadView view = attachedContainers->mmapPayload(
+        loc.containerId, loc.byteOffset, loc.byteLength);
     // interpret view.data[0 .. view.length) according to loc.encodingVersion
 }
 ```
@@ -132,7 +131,12 @@ for (int i = 0; i < segs.size(); i++) {
 Because `rangeScan` already returns segments in ascending
 `(blockRangeStart, mergeGeneration)` order, the index can fold delta
 segments forward or short-circuit on the first absolute snapshot it
-finds, depending on its encoding.
+finds, depending on its encoding. Internally the catalog walks the TOC
+BTree once, prunes catalog files whose 256-bit bloom over
+`(persistentTypeId, instanceId)` does not match and whose block range
+does not overlap `[fromBlock, toBlock]`, then range-scans the remaining
+per-file `BTree<SegmentLocator>`s via `findNext` to enumerate just the
+relevant entries.
 
 ## `mergeSegments`
 
@@ -155,22 +159,44 @@ dataDir/
         1.bin
         ...
     catalog/
-        toc.bin               table-of-contents: per catalog-file metadata
-                              (block range, segment count, payload size,
-                              256-bit bloom over (typeId, instanceId))
+        toc.bin               BTree<CatalogFileEntry> keyed by fileId;
+                              each entry caches the file's block range,
+                              live segment count, total catalogued
+                              payload bytes, and a 256-bit bloom over
+                              the (persistentTypeId, instanceId) pairs
+                              present in the file
         files/
-            <fileId>.bin      sorted log of SegmentLocator records; one
-                              file per ~2 GiB of catalogued payload
+            <fileId>.bin      BTree<SegmentLocator> keyed by
+                              (typeId, instanceId, blockRangeStart,
+                               mergeGeneration); one per ~2 GiB of
+                              catalogued payload
     indexes/
+        containers.bin        BTree<ContainerMetaEntry> keyed by
+                              containerId; the authoritative list of
+                              allocated containers (no directory scan)
         <containerId>.bin     packed segment containers; each file may
                               hold payloads from many different indexes
                               side-by-side, capped near 2 GiB
 ```
 
+Why two file types? `catalog/files/<id>.bin` are *metadata* BTrees
+(per-segment `SegmentLocator` records), while `indexes/<id>.bin` are the
+*payload* containers (raw bytes packed via `FreeSpaceFile`). Catalog
+files are kept tiny and BTree-indexed because every read goes through
+them; payload containers are large and packed for storage efficiency.
+A query first hits the catalog, then mmaps the relevant payload
+fragment from the container.
+
 The catalog and the index containers are **not** `fsync`'d. The journal
 is the source of truth; if the catalog or any container is corrupted on
 restart, the affected block range can be reindexed from the journal.
 This trade keeps the commit fast path I/O-bound only on the journal.
+
+Segment removal uses a tombstone bit on the `SegmentLocator` BTree
+entry rather than a true BTree delete (libexcessive's `BTree::remove`
+only handles leaf nodes today). Range scans skip tombstones; the disk
+region is released through the container's `FreeSpaceFile` on the same
+call.
 
 `IndexContainer` is backed by libexcessive's `FreeSpaceFile`, which
 lets compacted-away segment regions be reclaimed without rewriting the

@@ -219,7 +219,7 @@ void BlockchainBackend::sealOverrideToSegments(StateOverride& state, uint64_t bl
 		// the catalog and mmaping the payload from the container.
 		IndexContainerManager::WriteResult wr = containerManager.mut().write(payload);
 
-		SegmentLocator loc = {};
+		segment_btree_metadata_t loc = {};
 		loc.persistentTypeId = persistentTypeId;
 		loc.instanceId = instanceId;
 		loc.encodingVersion = idx->encodingVersion();
@@ -242,16 +242,16 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	int count = catalog.mut().countSegments(persistentTypeId, instanceId);
 	if ((uint32_t)count <= config.maxSegmentsPerIndex) return;
 
-	ArrayList<SegmentLocator> all = catalog.mut().getAllSegments(persistentTypeId, instanceId);
+	ArrayList<segment_btree_metadata_t> all = catalog.mut().getAllSegments(persistentTypeId, instanceId);
 
 	// Find the two smallest mergeable (under the size threshold) segments.
 	int firstIdx = -1;
 	int secondIdx = -1;
 	for (int i = 0; i < all.size(); ++i) {
-		const SegmentLocator& s = all.get(i);
+		const segment_btree_metadata_t& s = all.get(i);
 		if (s.byteLength > config.maxMergeableSegmentBytes) continue;
 		if (firstIdx < 0) { firstIdx = i; continue; }
-		const SegmentLocator& smallest = all.get(firstIdx);
+		const segment_btree_metadata_t& smallest = all.get(firstIdx);
 		if (s.byteLength < smallest.byteLength) {
 			secondIdx = firstIdx;
 			firstIdx = i;
@@ -261,8 +261,8 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	}
 	if (firstIdx < 0 || secondIdx < 0) return;
 
-	const SegmentLocator& a = all.get((firstIdx < secondIdx) ? firstIdx : secondIdx);
-	const SegmentLocator& b = all.get((firstIdx < secondIdx) ? secondIdx : firstIdx);
+	const segment_btree_metadata_t& a = all.get((firstIdx < secondIdx) ? firstIdx : secondIdx);
+	const segment_btree_metadata_t& b = all.get((firstIdx < secondIdx) ? secondIdx : firstIdx);
 
 	sp<BlockchainIndex> idx = indexes.getIndexAt(persistentTypeId);
 	if (!idx) return;
@@ -270,7 +270,7 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	// Ask the index to merge the input segments.  The index uses its
 	// attached catalog + container to mmap each input on demand and
 	// returns the combined payload.  An empty return aborts the merge.
-	ArrayList<SegmentLocator> mergeInputs;
+	ArrayList<segment_btree_metadata_t> mergeInputs;
 	mergeInputs.add(a);
 	mergeInputs.add(b);
 
@@ -282,7 +282,7 @@ void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t ins
 	// in, since they could have been packed across multiple containers.
 	IndexContainerManager::WriteResult mergedWr = containerManager.mut().write(merged);
 
-	SegmentLocator out = {};
+	segment_btree_metadata_t out = {};
 	out.persistentTypeId = persistentTypeId;
 	out.instanceId = instanceId;
 	out.encodingVersion = idx->encodingVersion();

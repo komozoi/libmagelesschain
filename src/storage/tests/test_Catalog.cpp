@@ -44,9 +44,9 @@ protected:
 			std::filesystem::remove_all(testDir);
 	}
 
-	static SegmentLocator makeLocator(uint16_t typeId, uint8_t instId, uint64_t start, uint64_t end,
+	static segment_btree_metadata_t makeLocator(uint16_t typeId, uint8_t instId, uint64_t start, uint64_t end,
 		uint32_t mergeGen = 0, uint64_t byteLength = 8) {
-		SegmentLocator loc = {};
+		segment_btree_metadata_t loc = {};
 		loc.persistentTypeId = typeId;
 		loc.instanceId = instId;
 		loc.encodingVersion = 1;
@@ -64,16 +64,16 @@ protected:
 TEST_F(CatalogTest, EmptyCatalogReturnsNoSegments) {
 	Catalog cat(testDir);
 	EXPECT_EQ(cat.countSegments(0, 0), 0);
-	ArrayList<SegmentLocator> segs = cat.getAllSegments(0, 0);
+	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
 	EXPECT_EQ(segs.size(), 0);
 }
 
 TEST_F(CatalogTest, InsertedSegmentIsRetrievable) {
 	Catalog cat(testDir);
-	SegmentLocator loc = makeLocator(0, 0, 0, 0);
+	segment_btree_metadata_t loc = makeLocator(0, 0, 0, 0);
 	cat.insert(loc);
 	EXPECT_EQ(cat.countSegments(0, 0), 1);
-	ArrayList<SegmentLocator> segs = cat.getAllSegments(0, 0);
+	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
 	ASSERT_EQ(segs.size(), 1);
 	EXPECT_EQ(segs.get(0).blockRangeStart, 0u);
 }
@@ -84,7 +84,7 @@ TEST_F(CatalogTest, MultipleSegmentsAscendingBlockOrder) {
 	cat.insert(makeLocator(0, 0, 0, 0));
 	cat.insert(makeLocator(0, 0, 3, 3));
 
-	ArrayList<SegmentLocator> segs = cat.getAllSegments(0, 0);
+	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
 	ASSERT_EQ(segs.size(), 3);
 	EXPECT_EQ(segs.get(0).blockRangeStart, 0u);
 	EXPECT_EQ(segs.get(1).blockRangeStart, 3u);
@@ -107,7 +107,7 @@ TEST_F(CatalogTest, RangeScanFiltersByBlockRange) {
 	Catalog cat(testDir);
 	for (uint64_t b = 0; b < 10; ++b) cat.insert(makeLocator(0, 0, b, b));
 
-	ArrayList<SegmentLocator> segs = cat.rangeScan(0, 0, 3, 5);
+	ArrayList<segment_btree_metadata_t> segs = cat.rangeScan(0, 0, 3, 5);
 	ASSERT_EQ(segs.size(), 3);
 	EXPECT_EQ(segs.get(0).blockRangeStart, 3u);
 	EXPECT_EQ(segs.get(2).blockRangeStart, 5u);
@@ -115,8 +115,8 @@ TEST_F(CatalogTest, RangeScanFiltersByBlockRange) {
 
 TEST_F(CatalogTest, RemoveDropsFromScan) {
 	Catalog cat(testDir);
-	SegmentLocator a = makeLocator(0, 0, 0, 0);
-	SegmentLocator b = makeLocator(0, 0, 1, 1);
+	segment_btree_metadata_t a = makeLocator(0, 0, 0, 0);
+	segment_btree_metadata_t b = makeLocator(0, 0, 1, 1);
 	cat.insert(a);
 	cat.insert(b);
 	EXPECT_EQ(cat.countSegments(0, 0), 2);
@@ -124,14 +124,14 @@ TEST_F(CatalogTest, RemoveDropsFromScan) {
 	cat.remove(a);
 	EXPECT_EQ(cat.countSegments(0, 0), 1);
 
-	ArrayList<SegmentLocator> segs = cat.getAllSegments(0, 0);
+	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
 	ASSERT_EQ(segs.size(), 1);
 	EXPECT_EQ(segs.get(0).blockRangeStart, 1u);
 }
 
 TEST_F(CatalogTest, RemovalSurvivesReopen) {
-	SegmentLocator a = makeLocator(0, 0, 0, 0);
-	SegmentLocator b = makeLocator(0, 0, 1, 1);
+	segment_btree_metadata_t a = makeLocator(0, 0, 0, 0);
+	segment_btree_metadata_t b = makeLocator(0, 0, 1, 1);
 	{
 		Catalog cat(testDir);
 		cat.insert(a);
@@ -141,7 +141,7 @@ TEST_F(CatalogTest, RemovalSurvivesReopen) {
 	{
 		Catalog cat(testDir);
 		EXPECT_EQ(cat.countSegments(0, 0), 1);
-		ArrayList<SegmentLocator> segs = cat.getAllSegments(0, 0);
+		ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
 		ASSERT_EQ(segs.size(), 1);
 		EXPECT_EQ(segs.get(0).blockRangeStart, 1u);
 	}
