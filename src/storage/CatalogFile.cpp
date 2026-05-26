@@ -46,7 +46,27 @@ public:
 
 
 MmapHandle CatalogFileReader::openEntry(uint64_t offset, uint64_t size) const {
-	return fd.getMmapHandle(offset, size, PROT_READ);
+	uint64_t readOffset = offset & ~4095;
+	MmapHandle handle = fd.getMmapHandle(readOffset, size + (offset - readOffset), PROT_READ);
+	if (readOffset)
+		handle.seek(offset - readOffset);
+	return handle;
+}
+
+void CatalogFileReader::forEachSegment(uint16_t indexId, uint64_t startBlock, uint64_t endBlock, const std::function<void(const segment_btree_metadata_t&)>& callback) const {
+	// Iterate via the BTree's keyed ordering (indexId, blockRangeStart, mergeGeneration).
+	// Start just below the requested block range so findNext lands on the first entry
+	// at-or-after it, then advance with successor() until we leave the indexId.
+	segment_btree_metadata_t cursor = {startBlock, 0, 0, 0, 0, 0, indexId, 0};
+	while (segmentIndex->findNext(cursor)) {
+		if (cursor.indexId != indexId)
+			break;
+		if (cursor.blockRangeStart > endBlock)
+			break;
+		if (cursor.blockRangeEnd >= startBlock)
+			callback(cursor);
+		cursor = segment_btree_metadata_t::successor(cursor);
+	}
 }
 
 

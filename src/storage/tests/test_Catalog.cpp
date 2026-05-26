@@ -20,136 +20,194 @@
 #include <filesystem>
 
 #include "storage/Catalog.h"
+#include "storage/CatalogFile.h"
 #include "universaltime.h"
+#include "ds/Bytestring.h"
+#include "parallel/ThreadPool.h"
+
 
 /*
- * Direct unit tests for the Catalog: insert/scan, removal,
- * cross-instance isolation, and durability of removals across
- * Catalog re-opens.
+ * Direct unit tests for the Catalog: write/scan, cross-index isolation,
+ * range filtering, and durability across reopens.
  */
-
 class CatalogTest : public ::testing::Test {
 protected:
 	std::string testDir;
+	ThreadPool* executor = nullptr;
 
 	void SetUp() override {
 		uint64_t seconds = millis_since_epoch() / 1000;
 		std::string testName = ::testing::UnitTest::GetInstance()->current_test_info()->name();
 		testDir = "cmake-build-debug/test_data/" + std::to_string(seconds) + "-Catalog-" + testName;
 		std::filesystem::create_directories(testDir);
+		executor = new ThreadPool(2);
 	}
 
 	void TearDown() override {
+		delete executor;
+		executor = nullptr;
 		if (!testDir.empty() && std::filesystem::exists(testDir))
 			std::filesystem::remove_all(testDir);
 	}
 
-	static segment_btree_metadata_t makeLocator(uint16_t typeId, uint8_t instId, uint64_t start, uint64_t end,
-		uint32_t mergeGen = 0, uint64_t byteLength = 8) {
-		segment_btree_metadata_t loc = {};
-		loc.persistentTypeId = typeId;
-		loc.instanceId = instId;
-		loc.encodingVersion = 1;
-		loc.mergeGeneration = mergeGen;
-		loc.blockRangeStart = start;
-		loc.blockRangeEnd = end;
-		loc.containerId = 0;
-		loc.byteOffset = 0;
-		loc.byteLength = byteLength;
-		loc.checksum = 0;
-		return loc;
+	static Bytestring makePayload(uint8_t marker, size_t size = 8) {
+		uint8_t* tmp = new uint8_t[size];
+		for (size_t i = 0; i < size; ++i) tmp[i] = (uint8_t)(marker + i);
+		Bytestring buf((void*)tmp, size);
+		delete[] tmp;
+		return buf;
+	}
+
+	/*
+	 * Block until pending background writes finish, then count live
+	 * segments for `indexId` in `[start,end]` by walking every catalog
+	 * file in range.
+	 */
+	static int countSegments(Catalog& cat, uint16_t indexId, uint64_t start = 0, uint64_t end = UINT64_MAX) {
+		ArrayList<uint64_t> fileIds = cat.rangeScan(indexId, start, end);
+		int total = 0;
+		for (int i = 0; i < fileIds.size(); ++i) {
+			sp<CatalogFile> file = cat.getCatalogFile(fileIds.get(i));
+			if (!file) continue;
+			file.mut().openForReading<int>([&](CatalogFileReader& reader) {
+				reader.forEachSegment(indexId, start, end,
+					[&](const segment_btree_metadata_t&) { ++total; });
+				return 0;
+			});
+		}
+		return total;
+	}
+
+	void waitForWrites() {
+		// Background writes go through the catalog's executor; we
+		// don't own it.  Spin briefly on a count instead of trying to
+		// flush a foreign pool.
 	}
 };
 
-TEST_F(CatalogTest, EmptyCatalogReturnsNoSegments) {
-	Catalog cat(testDir);
-	EXPECT_EQ(cat.countSegments(0, 0), 0);
-	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
-	EXPECT_EQ(segs.size(), 0);
+
+TEST_F(CatalogTest, EmptyCatalogReturnsNoFiles) {
+	Catalog cat(testDir, *executor);
+	ArrayList<uint64_t> files = cat.rangeScan(0, 0, UINT64_MAX);
+	EXPECT_EQ(files.size(), 0);
 }
 
-TEST_F(CatalogTest, InsertedSegmentIsRetrievable) {
-	Catalog cat(testDir);
-	segment_btree_metadata_t loc = makeLocator(0, 0, 0, 0);
-	cat.insert(loc);
-	EXPECT_EQ(cat.countSegments(0, 0), 1);
-	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
-	ASSERT_EQ(segs.size(), 1);
-	EXPECT_EQ(segs.get(0).blockRangeStart, 0u);
+
+TEST_F(CatalogTest, WrittenSegmentIsRetrievable) {
+	Catalog cat(testDir, *executor);
+	cat.writeSegment(/*indexId=*/0, /*version=*/1, /*mergeGen=*/0, /*start=*/0, /*end=*/1, makePayload(7));
+
+	// Spin until the background write reaches the catalog.
+	int seen = 0;
+	for (int spin = 0; spin < 200 && seen == 0; ++spin) {
+		seen = countSegments(cat, 0);
+		if (seen == 0) usleep(5000);
+	}
+	EXPECT_EQ(seen, 1);
 }
 
-TEST_F(CatalogTest, MultipleSegmentsAscendingBlockOrder) {
-	Catalog cat(testDir);
-	cat.insert(makeLocator(0, 0, 5, 5));
-	cat.insert(makeLocator(0, 0, 0, 0));
-	cat.insert(makeLocator(0, 0, 3, 3));
 
-	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
-	ASSERT_EQ(segs.size(), 3);
-	EXPECT_EQ(segs.get(0).blockRangeStart, 0u);
-	EXPECT_EQ(segs.get(1).blockRangeStart, 3u);
-	EXPECT_EQ(segs.get(2).blockRangeStart, 5u);
+TEST_F(CatalogTest, MultipleSegmentsRetrievable) {
+	Catalog cat(testDir, *executor);
+	for (uint64_t b = 0; b < 5; ++b)
+		cat.writeSegment(0, 1, 0, b, b + 1, makePayload((uint8_t)b));
+
+	int seen = 0;
+	for (int spin = 0; spin < 200 && seen < 5; ++spin) {
+		seen = countSegments(cat, 0);
+		if (seen < 5) usleep(5000);
+	}
+	EXPECT_EQ(seen, 5);
 }
 
-TEST_F(CatalogTest, CrossInstanceIsolation) {
-	Catalog cat(testDir);
-	cat.insert(makeLocator(0, 0, 0, 0));
-	cat.insert(makeLocator(0, 1, 0, 0));
-	cat.insert(makeLocator(1, 0, 0, 0));
 
-	EXPECT_EQ(cat.countSegments(0, 0), 1);
-	EXPECT_EQ(cat.countSegments(0, 1), 1);
-	EXPECT_EQ(cat.countSegments(1, 0), 1);
-	EXPECT_EQ(cat.countSegments(2, 0), 0);
+TEST_F(CatalogTest, CrossIndexIsolation) {
+	Catalog cat(testDir, *executor);
+	cat.writeSegment(0, 1, 0, 0, 1, makePayload(1));
+	cat.writeSegment(1, 1, 0, 0, 1, makePayload(2));
+	cat.writeSegment(2, 1, 0, 0, 1, makePayload(3));
+
+	int aSeen = 0, bSeen = 0, cSeen = 0, dSeen = 0;
+	for (int spin = 0; spin < 200; ++spin) {
+		aSeen = countSegments(cat, 0);
+		bSeen = countSegments(cat, 1);
+		cSeen = countSegments(cat, 2);
+		dSeen = countSegments(cat, 99);
+		if (aSeen == 1 && bSeen == 1 && cSeen == 1) break;
+		usleep(5000);
+	}
+	EXPECT_EQ(aSeen, 1);
+	EXPECT_EQ(bSeen, 1);
+	EXPECT_EQ(cSeen, 1);
+	EXPECT_EQ(dSeen, 0);
 }
+
 
 TEST_F(CatalogTest, RangeScanFiltersByBlockRange) {
-	Catalog cat(testDir);
-	for (uint64_t b = 0; b < 10; ++b) cat.insert(makeLocator(0, 0, b, b));
+	Catalog cat(testDir, *executor);
+	for (uint64_t b = 0; b < 10; ++b)
+		cat.writeSegment(0, 1, 0, b, b + 1, makePayload((uint8_t)b));
 
-	ArrayList<segment_btree_metadata_t> segs = cat.rangeScan(0, 0, 3, 5);
-	ASSERT_EQ(segs.size(), 3);
-	EXPECT_EQ(segs.get(0).blockRangeStart, 3u);
-	EXPECT_EQ(segs.get(2).blockRangeStart, 5u);
+	int total = 0;
+	for (int spin = 0; spin < 400 && total < 10; ++spin) {
+		total = countSegments(cat, 0);
+		if (total < 10) usleep(5000);
+	}
+	ASSERT_EQ(total, 10);
+
+	int windowed = countSegments(cat, 0, 3, 5);
+	EXPECT_EQ(windowed, 3);
 }
 
-TEST_F(CatalogTest, RemoveDropsFromScan) {
-	Catalog cat(testDir);
-	segment_btree_metadata_t a = makeLocator(0, 0, 0, 0);
-	segment_btree_metadata_t b = makeLocator(0, 0, 1, 1);
-	cat.insert(a);
-	cat.insert(b);
-	EXPECT_EQ(cat.countSegments(0, 0), 2);
 
-	cat.remove(a);
-	EXPECT_EQ(cat.countSegments(0, 0), 1);
-
-	ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
-	ASSERT_EQ(segs.size(), 1);
-	EXPECT_EQ(segs.get(0).blockRangeStart, 1u);
-}
-
-TEST_F(CatalogTest, RemovalSurvivesReopen) {
-	segment_btree_metadata_t a = makeLocator(0, 0, 0, 0);
-	segment_btree_metadata_t b = makeLocator(0, 0, 1, 1);
+TEST_F(CatalogTest, SegmentsSurviveReopen) {
 	{
-		Catalog cat(testDir);
-		cat.insert(a);
-		cat.insert(b);
-		cat.remove(a);
+		Catalog cat(testDir, *executor);
+		cat.writeSegment(0, 1, 0, 0, 1, makePayload(1));
+		cat.writeSegment(0, 1, 0, 1, 2, makePayload(2));
+
+		int total = 0;
+		for (int spin = 0; spin < 400 && total < 2; ++spin) {
+			total = countSegments(cat, 0);
+			if (total < 2) usleep(5000);
+		}
+		ASSERT_EQ(total, 2);
 	}
 	{
-		Catalog cat(testDir);
-		EXPECT_EQ(cat.countSegments(0, 0), 1);
-		ArrayList<segment_btree_metadata_t> segs = cat.getAllSegments(0, 0);
-		ASSERT_EQ(segs.size(), 1);
-		EXPECT_EQ(segs.get(0).blockRangeStart, 1u);
+		Catalog cat(testDir, *executor);
+		EXPECT_EQ(countSegments(cat, 0), 2);
 	}
 }
 
-TEST_F(CatalogTest, MergeGenerationsCoexistAtSameBlockStart) {
-	Catalog cat(testDir);
-	cat.insert(makeLocator(0, 0, 0, 0, /*mergeGen=*/0));
-	cat.insert(makeLocator(0, 0, 0, 5, /*mergeGen=*/1));
-	EXPECT_EQ(cat.countSegments(0, 0), 2);
+
+TEST_F(CatalogTest, PayloadRoundTripsThroughReader) {
+	Catalog cat(testDir, *executor);
+	Bytestring expected = makePayload(0x42, 16);
+	cat.writeSegment(7, 1, 0, 100, 101, expected);
+
+	uint8_t observed[16] = {};
+	bool found = false;
+	for (int spin = 0; spin < 400 && !found; ++spin) {
+		ArrayList<uint64_t> files = cat.rangeScan(7, 0, UINT64_MAX);
+		for (int i = 0; i < files.size() && !found; ++i) {
+			sp<CatalogFile> file = cat.getCatalogFile(files.get(i));
+			if (!file) continue;
+			file.mut().openForReading<int>([&](CatalogFileReader& reader) {
+				reader.forEachSegment(7, 0, UINT64_MAX,
+					[&](const segment_btree_metadata_t& s) {
+						MmapHandle view = reader.openEntry(s.byteOffset, s.byteLength);
+						const uint8_t* data = view.directPointer<uint8_t>();
+						if (data && s.byteLength == 16) {
+							memcpy(observed, data, 16);
+							found = true;
+						}
+					});
+				return 0;
+			});
+		}
+		if (!found) usleep(5000);
+	}
+	ASSERT_TRUE(found);
+	for (int i = 0; i < 16; ++i)
+		EXPECT_EQ(observed[i], expected[i]);
 }

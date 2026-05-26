@@ -62,7 +62,7 @@ struct blockchain_epoch_header_t {
 
 
 BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir, sp<ChainDesign> design, BlockchainConfig config)
-	: config(config), dataDir(dataDir), openEpochs(32), design(std::move(design)), log(logger, "BlockchainBackend") {
+	: config(config), dataDir(dataDir), openEpochs(32), design(std::move(design)), executor(2), log(logger, "BlockchainBackend") {
 	mkdir(dataDir.c_str(), 0770);
 	mkdir((dataDir + "/epochs").c_str(), 0770);
 	FdHandle metadataHandle = FdHandle::open((dataDir + "/metadata.bin").c_str(), O_RDWR | O_CREAT, 0660);
@@ -78,27 +78,26 @@ BlockchainBackend::BlockchainBackend(Logger& logger, const std::string& dataDir,
 	this->design.mut().registerOverrides(overrideReg);
 	this->design.mut().registerTransactionTypes(txTypes);
 
-	// Storage layer: catalog tracks segment locations and integrity;
-	// container manager owns the per-index payload containers.  Both live
-	// under dataDir/ so a chain's storage is fully contained.
-	catalog = sp<Catalog>::create(dataDir + "/catalog");
-	containerManager = sp<IndexContainerManager>::create(dataDir + "/indexes");
+	// Storage layer: the catalog owns its directory tree and all on-disk
+	// segment metadata (TOC BTree + per-file BTrees).  Segment payload
+	// bytes live inside the catalog files themselves, packed via the
+	// catalog file's FreeSpaceFile.
+	catalog = sp<Catalog>::create(dataDir + "/catalog", executor);
 
-	// Wire each registered index to its on-disk storage so it can answer
-	// queries by mmap'ing segments listed in the catalog.  The segments
-	// themselves are the materialized committed state, so opening the
-	// chain costs O(catalog metadata) regardless of chain size.
+	// Wire each registered index to the catalog so it can answer queries
+	// by mmap'ing segment payloads on demand.  No transaction replay and
+	// no in-RAM state reconstruction at startup; opening the chain costs
+	// O(catalog metadata) regardless of chain size.
 	attachIndexesToStorage();
 }
 
 void BlockchainBackend::attachIndexesToStorage() {
 	const ArrayList<BackendRegistry::Entry>& entries = indexes.getEntries();
 	for (int i = 0; i < entries.size(); ++i) {
-		const BackendRegistry::Entry& e = entries.get(i);
-		uint16_t persistentTypeId = (uint16_t)i;
-		sp<BlockchainIndex> idx = indexes.getIndexAt(persistentTypeId);
+		uint16_t indexId = (uint16_t)i;
+		sp<BlockchainIndex> idx = indexes.getIndexAt(indexId);
 		if (!idx) continue;
-		idx.mut().attach(catalog.get(), containerManager.get(), persistentTypeId, e.id);
+		idx.mut().attach(catalog.get(), indexId);
 	}
 }
 
@@ -206,110 +205,13 @@ void BlockchainBackend::sealOverrideToSegments(StateOverride& state, uint64_t bl
 		sp<BlockchainIndex> idx = indexes.getIndexAt((uint16_t)i);
 		if (!idx) continue;
 
-		const BackendRegistry::Entry& e = indexEntries.get(i);
-		uint16_t persistentTypeId = (uint16_t)i;
-		uint8_t instanceId = e.id;
-
-		// Persist the payload through the container manager, then
-		// catalog it.  The container manager picks a destination
-		// container that won't blow the per-container size cap; the
-		// returned WriteResult is exactly the (containerId, offset,
-		// length) triple the locator needs.  The index will discover
-		// the new segment lazily on its next query by range-scanning
-		// the catalog and mmaping the payload from the container.
-		IndexContainerManager::WriteResult wr = containerManager.mut().write(payload);
-
-		segment_btree_metadata_t loc = {};
-		loc.persistentTypeId = persistentTypeId;
-		loc.instanceId = instanceId;
-		loc.encodingVersion = idx->encodingVersion();
-		loc.mergeGeneration = 0;
-		loc.blockRangeStart = blockNumber;
-		loc.blockRangeEnd = blockNumber;
-		loc.containerId = wr.containerId;
-		loc.byteOffset = wr.offset;
-		loc.byteLength = wr.length;
-		loc.checksum = (uint64_t)excessiveFastHash(&payload[0], payload.size());
-		catalog.mut().insert(loc);
-
-		// Opportunistic compaction.
-		// TODO: Do this with a libexcessive ThreadPool in the background
-		maybeCompactIndex(persistentTypeId, instanceId, blockNumber);
+		// Route the sealed payload to the catalog.  It picks a catalog
+		// file by locality + capacity and writes the segment in the
+		// background via the executor.  Indexes pick up the new segment
+		// lazily on their next query through Catalog::rangeScan +
+		// CatalogFile::openForReading.
+		catalog.mut().writeSegment((uint16_t)i, idx->encodingVersion(), 0, blockNumber, blockNumber + 1, payload);
 	}
-}
-
-void BlockchainBackend::maybeCompactIndex(uint16_t persistentTypeId, uint8_t instanceId, uint64_t currentBlock) {
-	int count = catalog.mut().countSegments(persistentTypeId, instanceId);
-	if ((uint32_t)count <= config.maxSegmentsPerIndex) return;
-
-	ArrayList<segment_btree_metadata_t> all = catalog.mut().getAllSegments(persistentTypeId, instanceId);
-
-	// Find the two smallest mergeable (under the size threshold) segments.
-	int firstIdx = -1;
-	int secondIdx = -1;
-	for (int i = 0; i < all.size(); ++i) {
-		const segment_btree_metadata_t& s = all.get(i);
-		if (s.byteLength > config.maxMergeableSegmentBytes) continue;
-		if (firstIdx < 0) { firstIdx = i; continue; }
-		const segment_btree_metadata_t& smallest = all.get(firstIdx);
-		if (s.byteLength < smallest.byteLength) {
-			secondIdx = firstIdx;
-			firstIdx = i;
-		} else if (secondIdx < 0 || s.byteLength < all.get(secondIdx).byteLength) {
-			secondIdx = i;
-		}
-	}
-	if (firstIdx < 0 || secondIdx < 0) return;
-
-	const segment_btree_metadata_t& a = all.get((firstIdx < secondIdx) ? firstIdx : secondIdx);
-	const segment_btree_metadata_t& b = all.get((firstIdx < secondIdx) ? secondIdx : firstIdx);
-
-	sp<BlockchainIndex> idx = indexes.getIndexAt(persistentTypeId);
-	if (!idx) return;
-
-	// Ask the index to merge the input segments.  The index uses its
-	// attached catalog + container to mmap each input on demand and
-	// returns the combined payload.  An empty return aborts the merge.
-	ArrayList<segment_btree_metadata_t> mergeInputs;
-	mergeInputs.add(a);
-	mergeInputs.add(b);
-
-	Bytestring merged = idx->mergeSegments(mergeInputs);
-	if (merged.size() == 0) return;
-
-	// Container manager picks a destination container for the merged
-	// output; it may or may not be the same container the inputs lived
-	// in, since they could have been packed across multiple containers.
-	IndexContainerManager::WriteResult mergedWr = containerManager.mut().write(merged);
-
-	segment_btree_metadata_t out = {};
-	out.persistentTypeId = persistentTypeId;
-	out.instanceId = instanceId;
-	out.encodingVersion = idx->encodingVersion();
-	out.mergeGeneration = (a.mergeGeneration > b.mergeGeneration ? a.mergeGeneration : b.mergeGeneration) + 1;
-	out.blockRangeStart = (a.blockRangeStart < b.blockRangeStart) ? a.blockRangeStart : b.blockRangeStart;
-	out.blockRangeEnd = (a.blockRangeEnd > b.blockRangeEnd) ? a.blockRangeEnd : b.blockRangeEnd;
-	out.containerId = mergedWr.containerId;
-	out.byteOffset = mergedWr.offset;
-	out.byteLength = mergedWr.length;
-	out.checksum = (uint64_t)excessiveFastHash(&merged[0], merged.size());
-	catalog.mut().insert(out);
-
-	// Delete the input catalog entries and return their disk regions to
-	// the owning container's FreeSpaceFile.  The merged output now
-	// authoritatively covers the combined block range of its inputs.
-	catalog.mut().remove(a);
-	catalog.mut().remove(b);
-	containerManager.mut().freeRegion(a.containerId, a.byteOffset, a.byteLength);
-	containerManager.mut().freeRegion(b.containerId, b.byteOffset, b.byteLength);
-
-	(void)currentBlock;
-	log.debug("Compacted index typeId=%u id=%u: merged segments [%lu,%lu] and [%lu,%lu] into [%lu,%lu] gen=%u",
-		(unsigned)persistentTypeId, (unsigned)instanceId,
-		(unsigned long)a.blockRangeStart, (unsigned long)a.blockRangeEnd,
-		(unsigned long)b.blockRangeStart, (unsigned long)b.blockRangeEnd,
-		(unsigned long)out.blockRangeStart, (unsigned long)out.blockRangeEnd,
-		(unsigned)out.mergeGeneration);
 }
 
 
@@ -416,5 +318,8 @@ MmapHandle* BlockchainBackend::getEpochFile(uint64_t blockNumber) {
 }
 
 BlockchainBackend::~BlockchainBackend() {
+	// Drain any background segment writes before tearing the catalog
+	// down, since catalog tasks reference Catalog/CatalogFile members.
+	executor.shutdown();
 	openEpochs.clear();
 }

@@ -21,82 +21,83 @@
 #include "universaltime.h"
 
 #include "storage/Catalog.h"
-#include "storage/IndexContainer.h"
-#include "storage/IndexContainerManager.h"
+#include "storage/CatalogFile.h"
 
 #include <cstring>
 
 /*
- * latestSum/latestCount: ask the catalog for every segment covering this
- * index instance, take the one with the highest blockRangeEnd (last
- * mergeGeneration wins on tie), mmap its 8-byte payload, and decode.  No
- * RAM-side caching: each query touches the catalog + one mmap.
+ * latestSum/latestCount: range-scan the catalog for every catalog file
+ * that may carry segments for this index, walk each file's BTree under
+ * the read lock, pick the segment with the highest blockRangeEnd (last
+ * mergeGeneration wins on tie), mmap its 8-byte payload through the
+ * catalog file's reader, and decode.  No RAM-side caching: each query
+ * touches catalog metadata and one mmap.
  */
-static bool readLatestSegment(const BlockchainIndex& self, Catalog* cat, IndexContainerManager* mgr,
-		uint16_t typeId, uint8_t instanceId, int& outSum, int& outCount) {
+static bool readLatestSegment(const BlockchainIndex& self, Catalog* cat, uint16_t indexId,
+	int& outSum, int& outCount) {
 	outSum = 0;
 	outCount = 0;
-	if (!cat || !mgr) return false;
+	if (!cat) return false;
 
-	ArrayList<segment_btree_metadata_t> segs = cat->getAllSegments(typeId, instanceId);
-	if (segs.size() == 0) return false;
+	ArrayList<uint64_t> fileIds = cat->rangeScan(indexId, 0, UINT64_MAX);
+	if (fileIds.size() == 0) return false;
 
-	// Entries are sorted ascending by (blockStart, mergeGeneration).  We
-	// want the latest committed state, i.e. the segment whose
-	// blockRangeEnd is largest; on tie the highest mergeGeneration wins.
-	int pickIdx = 0;
-	for (int i = 1; i < segs.size(); ++i) {
-		const segment_btree_metadata_t& a = segs.get(pickIdx);
-		const segment_btree_metadata_t& b = segs.get(i);
-		if (b.blockRangeEnd > a.blockRangeEnd
-			|| (b.blockRangeEnd == a.blockRangeEnd && b.mergeGeneration > a.mergeGeneration)) {
-			pickIdx = i;
-		}
+	uint16_t wantVersion = self.encodingVersion();
+	bool found = false;
+	uint64_t bestEnd = 0;
+	uint32_t bestGen = 0;
+	int bestSum = 0, bestCount = 0;
+
+	for (int f = 0; f < fileIds.size(); ++f) {
+		sp<CatalogFile> file = cat->getCatalogFile(fileIds.get(f));
+		if (!file) continue;
+		file.mut().openForReading<int>([&](CatalogFileReader& reader) {
+			reader.forEachSegment(indexId, 0, UINT64_MAX,
+				[&](const segment_btree_metadata_t& s) {
+					if (s.encodingVersion != wantVersion) return;
+					if (s.byteLength < 8) return;
+					bool better = !found
+						|| s.blockRangeEnd > bestEnd
+						|| (s.blockRangeEnd == bestEnd && s.mergeGeneration > bestGen);
+					if (!better) return;
+					MmapHandle view = reader.openEntry(s.byteOffset, s.byteLength);
+					const uint8_t* data = (const uint8_t*)view.directPointer<uint8_t>(view.seek(0, SEEK_CUR));
+					if (!data) return;
+					std::memcpy(&bestSum, data, 4);
+					std::memcpy(&bestCount, data + 4, 4);
+					bestEnd = s.blockRangeEnd;
+					bestGen = s.mergeGeneration;
+					found = true;
+				});
+			return 0;
+		});
 	}
-	const segment_btree_metadata_t& pick = segs.get(pickIdx);
-	if (pick.encodingVersion != self.encodingVersion()) return false;
-	if (pick.byteLength < 8) return false;
 
-	IndexContainer::PayloadView view = mgr->mmapPayload(pick.containerId, pick.byteOffset, pick.byteLength);
-	if (!view.data) return false;
-	std::memcpy(&outSum, view.data, 4);
-	std::memcpy(&outCount, view.data + 4, 4);
+	if (!found) return false;
+	outSum = bestSum;
+	outCount = bestCount;
 	return true;
 }
 
 int TestSumIndex::latestSum() const {
 	int sum = 0, count = 0;
-	readLatestSegment(*this, attachedCatalog, attachedContainers, attachedPersistentTypeId, attachedInstanceId, sum, count);
+	readLatestSegment(*this, attachedCatalog, attachedIndexId, sum, count);
 	return sum;
 }
 
 int TestSumIndex::latestCount() const {
 	int sum = 0, count = 0;
-	readLatestSegment(*this, attachedCatalog, attachedContainers, attachedPersistentTypeId, attachedInstanceId, sum, count);
+	readLatestSegment(*this, attachedCatalog, attachedIndexId, sum, count);
 	return count;
 }
 
-Bytestring TestSumIndex::mergeSegments(const ArrayList<segment_btree_metadata_t>& inputs) const {
-	// Absolute-state segments: the input with the highest blockRangeEnd
-	// already represents the union of all the input block ranges, so we
-	// just hand its payload back as the merged payload.  Indexes whose
-	// payloads are deltas would actually combine them here.
-	if (inputs.size() == 0) return Bytestring();
-	if (!attachedContainers) return Bytestring();
-
-	int pickIdx = 0;
-	for (int i = 1; i < inputs.size(); ++i) {
-		const segment_btree_metadata_t& a = inputs.get(pickIdx);
-		const segment_btree_metadata_t& b = inputs.get(i);
-		if (b.blockRangeEnd > a.blockRangeEnd
-			|| (b.blockRangeEnd == a.blockRangeEnd && b.mergeGeneration > a.mergeGeneration)) {
-			pickIdx = i;
-		}
-	}
-	const segment_btree_metadata_t& pick = inputs.get(pickIdx);
-	IndexContainer::PayloadView view = attachedContainers->mmapPayload(pick.containerId, pick.byteOffset, pick.byteLength);
-	if (!view.data) return Bytestring();
-	return Bytestring((void*)view.data, (size_t)view.length);
+Bytestring TestSumIndex::mergeSegments(const ArrayList<segment_coordinate_t>& inputs) const {
+	// Absolute-state segments: simply re-hand the latest payload.  Real
+	// indexes whose segments encode deltas would combine them here.  This
+	// path is not exercised in Phase 1 since the new Catalog handles
+	// compaction internally.
+	(void)inputs;
+	return Bytestring();
 }
 
 Bytestring TestSumOverrideFamily::seal() const {

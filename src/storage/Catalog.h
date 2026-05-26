@@ -148,7 +148,7 @@ private:
 	BTree<catalog_contents_entry_t, 31>* tocBTree;
 
 	// This is used to ensure time-based filenames are not duplicated.
-	uint64_t lastFileId;
+	uint64_t lastFileId = 0;
 
 	CustomizableFileCache<CatalogFile> catalogCache;
 	ThreadPool& executor;

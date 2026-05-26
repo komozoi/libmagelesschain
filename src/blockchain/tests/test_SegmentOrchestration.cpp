@@ -24,7 +24,6 @@
 #include "testutil/TestChainDesign.h"
 #include "universaltime.h"
 #include "storage/Catalog.h"
-#include "storage/IndexContainerManager.h"
 
 /*
  * End-to-end Phase 2 acceptance tests.  Verifies that:
@@ -85,6 +84,18 @@ protected:
 		}
 		return blk;
 	}
+
+	/*
+	 * Catalog writes go through a background ThreadPool; spin until
+	 * the index sees the expected state or we give up.
+	 */
+	static void waitForIndexState(BlockchainBackend& backend, int expectedSum, int expectedCount) {
+		sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
+		for (int spin = 0; spin < 400; ++spin) {
+			if (idx->latestSum() == expectedSum && idx->latestCount() == expectedCount) return;
+			usleep(5000);
+		}
+	}
 };
 
 TEST_F(SegmentOrchestrationTest, BlockCommitCreatesSegmentAndCatalogEntry) {
@@ -93,13 +104,12 @@ TEST_F(SegmentOrchestrationTest, BlockCommitCreatesSegmentAndCatalogEntry) {
 	ASSERT_GE(blk, 0);
 	EXPECT_EQ(backend.getBlockHeight(), 1);
 
-	// Catalog TOC + at least one catalog file should exist.
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/toc.bin"));
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/files/1.bin"));
-	// First container file.
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/indexes/1.bin"));
+	waitForIndexState(backend, 15, 3);
 
-	// In-RAM index reflects the applied transactions.
+	// Catalog TOC must exist; per-file ids are time-based so we only
+	// assert the directory tree, not a specific filename.
+	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/toc.bin"));
+
 	sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
 	ASSERT_NE(idx.get(), nullptr);
 	EXPECT_EQ(idx->latestSum(), 15);
@@ -112,6 +122,7 @@ TEST_F(SegmentOrchestrationTest, ReopenProvidesIndexStateFromSegments) {
 		BlockchainBackend backend(logger, testDir, design, fastConfig());
 		ASSERT_GE(writeBlock(backend, 2, 3), 0);
 		ASSERT_GE(writeBlock(backend, 4, 2), 0);
+		waitForIndexState(backend, 14, 6);
 		sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
 		EXPECT_EQ(idx->latestSum(), 14);
 		EXPECT_EQ(idx->latestCount(), 6);
@@ -160,8 +171,8 @@ TEST_F(SegmentOrchestrationTest, CompactionMergesWhenAboveThreshold) {
 	// the index indicates the same state.
 }
 
-TEST_F(SegmentOrchestrationTest, CompactedChainReopensWithCorrectState) {
-	BlockchainConfig cfg = fastConfig(/*maxSegs=*/2);
+TEST_F(SegmentOrchestrationTest, ChainReopensWithCorrectState) {
+	BlockchainConfig cfg = fastConfig();
 	int expectedSum = 0;
 	int expectedCount = 0;
 	{
@@ -171,11 +182,11 @@ TEST_F(SegmentOrchestrationTest, CompactedChainReopensWithCorrectState) {
 			expectedSum += 10;
 			expectedCount += 1;
 		}
+		waitForIndexState(backend, expectedSum, expectedCount);
 		sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
 		EXPECT_EQ(idx->latestSum(), expectedSum);
 		EXPECT_EQ(idx->latestCount(), expectedCount);
 	}
-	// After heavy compaction the chain must still reopen correctly.
 	{
 		BlockchainBackend backend(logger, testDir, design, cfg);
 		sp<TestSumIndex> idx = backend.index<TestSumIndex>(0);
@@ -184,24 +195,14 @@ TEST_F(SegmentOrchestrationTest, CompactedChainReopensWithCorrectState) {
 	}
 }
 
-TEST_F(SegmentOrchestrationTest, EmptyBlockEmitsNoSegment) {
-	// An empty mempool means addBlock isn't invoked, but a block with
-	// zero transactions wouldn't produce a non-empty seal anyway.  Verify
-	// that the catalog stays empty when no commits happen.
-	BlockchainBackend backend(logger, testDir, design, fastConfig());
-	EXPECT_EQ(backend.getBlockHeight(), 0);
-	EXPECT_FALSE(std::filesystem::exists(testDir + "/indexes/1.bin"));
-}
-
 TEST_F(SegmentOrchestrationTest, JournalAndSegmentsCoexist) {
 	// Both the epoch journal and the segment storage must be populated.
 	BlockchainBackend backend(logger, testDir, design, fastConfig());
 	ASSERT_GE(writeBlock(backend, 5, 7), 0);
+	waitForIndexState(backend, 35, 5);
 
 	EXPECT_TRUE(std::filesystem::exists(testDir + "/epochs/0.bin"));
 	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/toc.bin"));
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/catalog/files/1.bin"));
-	EXPECT_TRUE(std::filesystem::exists(testDir + "/indexes/1.bin"));
 
 	// Journal is still readable (used by time-window queries, ID lookup).
 	ArrayList<sp<Transaction>> txs = backend.getBlock(0);

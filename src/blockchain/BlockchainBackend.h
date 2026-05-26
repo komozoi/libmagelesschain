@@ -30,11 +30,11 @@
 #include "StateOverride.h"
 #include "TransactionTypeRegistry.h"
 #include "storage/Catalog.h"
-#include "storage/IndexContainerManager.h"
 #include "alloc/pointer.h"
 #include "ds/ArrayList.h"
 #include "ds/HashMap.h"
 #include "fs/FdHandle.h"
+#include "parallel/ThreadPool.h"
 
 
 struct blockchain_metadata_header_t;
@@ -96,11 +96,12 @@ private:
 
 	/*
 	 * Wire every registered index up to its storage by calling
-	 * BlockchainIndex::attach() with the catalog, container manager, and
-	 * the index's (persistentTypeId, instanceId) coordinates.  After this
-	 * returns, indexes can answer queries by range-scanning the catalog
-	 * and mmaping their own segment payloads on demand.  No transaction
-	 * replay and no in-RAM state reconstruction at startup.
+	 * BlockchainIndex::attach(catalog, indexId).  The `indexId` is the
+	 * registration order within the active ChainDesign, which is stable
+	 * across restarts.  After this returns, indexes can answer queries by
+	 * range-scanning the catalog and mmaping their own segment payloads
+	 * on demand.  No transaction replay and no in-RAM state
+	 * reconstruction at startup.
 	 */
 	void attachIndexesToStorage();
 
@@ -117,24 +118,12 @@ private:
 	 * Seal the override into segments and persist them.  Walks override
 	 * families in registration order, pairs them positionally with indexes
 	 * (the i-th override family corresponds to the i-th index registered
-	 * by the ChainDesign), and for each non-empty seal payload writes the
-	 * payload through the container manager and inserts a catalog entry.
-	 * Indexes pick up the new segment lazily on their next query by
-	 * range-scanning the catalog and mmaping the payload from the
-	 * container.
+	 * by the ChainDesign), and for each non-empty seal payload routes the
+	 * payload to Catalog::writeSegment, which selects a catalog file and
+	 * writes the segment in the background.  Indexes discover new
+	 * segments lazily on their next query.
 	 */
 	void sealOverrideToSegments(StateOverride& state, uint64_t blockNumber);
-
-	/*
-	 * If the index instance has more segments than the configured
-	 * threshold, merge the two smallest mergeable segments (each under
-	 * maxMergeableSegmentBytes) into one.  The catalog records the merged
-	 * output, then the inputs are removed from the catalog entirely
-	 * (Catalog::remove) and their disk regions returned to the index's
-	 * FreeSpaceFile.  The merged output authoritatively covers the
-	 * combined block range of its inputs.
-	 */
-	void maybeCompactIndex(uint16_t persistentTypeId, uint8_t instanceId, uint64_t currentBlock);
 
 	BlockchainConfig config;
 	std::string dataDir;
@@ -147,8 +136,8 @@ private:
 	StateOverrideRegistry overrideReg;
 	TransactionTypeRegistry txTypes;
 
+	ThreadPool executor;
 	sp<Catalog> catalog;
-	sp<IndexContainerManager> containerManager;
 
 	LogEndpoint log;
 

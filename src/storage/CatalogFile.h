@@ -103,6 +103,14 @@ public:
 
 	MmapHandle openEntry(uint64_t offset, uint64_t size) const;
 
+	/*
+	 * Walk every segment of `indexId` whose [blockRangeStart, blockRangeEnd]
+	 * intersects [startBlock, endBlock] (inclusive), in ascending
+	 * (blockRangeStart, mergeGeneration) order.  Caller must hold the read
+	 * lock through openForReading() so the BTree stays stable.
+	 */
+	void forEachSegment(uint16_t indexId, uint64_t startBlock, uint64_t endBlock, const std::function<void(const segment_btree_metadata_t&)>& callback) const;
+
 private:
 	FdHandle fd;
 	BTree<segment_btree_metadata_t>* segmentIndex;
@@ -139,7 +147,7 @@ public:
 	uint64_t getTotalBytes() const;
 
 private:
-	const FdHandle& fd;
+	FdHandle fd;
 	FreeSpaceFile regions;
 	BTree<segment_btree_metadata_t>* segmentIndex;
 

@@ -22,6 +22,7 @@
 
 #include <string>
 #include "fcntl.h"
+#include <sys/stat.h>
 
 #include <ds/HashMap.h>
 #include <fs/FdHandle.h>
@@ -39,8 +40,8 @@ class CustomizableFileCache {
 public:
 	CustomizableFileCache(std::string root, std::function<sp<T>(const FdHandle&)> builder, unsigned int size = 32)
 		: root(std::move(root)), builder(std::move(builder)), openPaths(size) {
-		if (root.back() != '/')
-			root += '/';
+		if (this->root.empty() || this->root.back() != '/')
+			this->root += '/';
 	}
 
 	sp<T> open(const std::string& path, int mode = O_RDWR, int flag = 0660) {

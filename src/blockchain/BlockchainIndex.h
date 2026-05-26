@@ -24,7 +24,6 @@
 #include "ds/ArrayList.h"
 
 class Catalog;
-class IndexContainerManager;
 
 struct segment_coordinate_t {
 	uint64_t fileId;
@@ -82,12 +81,9 @@ public:
 	 * (caches, etc.) may override and call this base implementation
 	 * first.
 	 */
-	virtual void attach(Catalog* catalog, IndexContainerManager* containers,
-		uint16_t persistentTypeId, uint8_t instanceId) {
+	virtual void attach(Catalog* catalog, uint16_t indexId) {
 		this->attachedCatalog = catalog;
-		this->attachedContainers = containers;
-		this->attachedPersistentTypeId = persistentTypeId;
-		this->attachedInstanceId = instanceId;
+		this->attachedIndexId = indexId;
 	}
 
 	/*
@@ -111,9 +107,7 @@ protected:
 	 * segment payloads.
 	 */
 	Catalog* attachedCatalog = nullptr;
-	IndexContainerManager* attachedContainers = nullptr;
-	uint16_t attachedPersistentTypeId = 0;
-	uint8_t attachedInstanceId = 0;
+	uint16_t attachedIndexId = 0;
 };
 
 #endif //LIBMAGELESSCHAIN_BLOCKCHAININDEX_H

@@ -63,8 +63,8 @@ int catalog_contents_entry_t::compare(const catalog_contents_entry_t& a, const c
 	// New files are likely more interesting for putting new segments into, for example,
 	// or for querying the latest data.
 
-	if (a.fileId < b.fileId) return -1;
-	if (a.fileId > b.fileId) return 1;
+	if (a.fileId < b.fileId) return 1;
+	if (a.fileId > b.fileId) return -1;
 	return 0;
 }
 
@@ -80,6 +80,7 @@ static sp<CatalogFile> buildCatalogFile(const FdHandle& fd) {
  */
 Catalog::Catalog(const std::string& catalogDir, ThreadPool& executor)
 	: catalogDir(catalogDir), catalogCache(catalogDir, buildCatalogFile), executor(executor) {
+	// Deliberately ignore errors.
 	mkdir(catalogDir.c_str(), 0770);
 
 	FdHandle tocFile = FdHandle::open((catalogDir + "/toc.bin").c_str(), O_RDWR | O_CREAT, 0660);
@@ -95,6 +96,8 @@ sp<CatalogFile> Catalog::getCatalogFile(uint64_t fileId) {
 void Catalog::writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGeneration, uint64_t startBlock, uint64_t endBlock, const Bytestring& content) {
 	catalog_contents_entry_t key;
 	sp<CatalogFile> file = selectFileFor(indexId, startBlock, endBlock, content.size(), key);
+	if (!file)
+		throw std::runtime_error("Unable to find a catalog file to write a segment too.  Errno: " + std::string(strerror(errno)));
 
 	executor.submit([this, indexId, version, mergeGeneration, startBlock, endBlock, content, file, key]() mutable {
 		file.mut().createEntry(indexId, version, mergeGeneration, startBlock, endBlock, content);
@@ -106,7 +109,7 @@ void Catalog::writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGen
 		key.segmentCount++;
 
 		std::unique_lock _(tocMutex);
-		tocBTree->insert(key);
+		tocBTree->overwrite(key);
 	});
 }
 
@@ -183,7 +186,7 @@ sp<CatalogFile> Catalog::selectFileFor(uint16_t indexId, uint64_t startBlock, ui
 		tocBTree->insert(key);
 	}
 
-	return catalogCache.open(idToFilename(newId));
+	return catalogCache.open(idToFilename(newId), O_RDWR | O_CREAT);
 }
 
 Catalog::~Catalog() {
