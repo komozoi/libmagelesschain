@@ -30,6 +30,9 @@
 #include "StateOverride.h"
 #include "TransactionTypeRegistry.h"
 #include "storage/Catalog.h"
+#include "storage/CustomizableFileCache.h"
+#include "EpochFile.h"
+#include "BlockTimestampTracker.h"
 #include "alloc/pointer.h"
 #include "ds/ArrayList.h"
 #include "ds/HashMap.h"
@@ -38,12 +41,6 @@
 
 
 struct blockchain_metadata_header_t;
-
-struct block_header_t {
-	uint64_t millis;
-	uint16_t numTransactions;
-	uint8_t reserved[54];
-};
 
 /*
  * Backend storage layer.  Owns the durable epoch journal, the typed index
@@ -91,8 +88,7 @@ public:
 	~BlockchainBackend();
 
 private:
-	MmapHandle* getEpochFile(uint64_t blockNumber);
-	uint32_t getBlockOffset(uint64_t blockNumber);
+	sp<EpochFile> getEpochFile(uint64_t blockNumber);
 
 	/*
 	 * Wire every registered index up to its storage by calling
@@ -127,7 +123,7 @@ private:
 
 	BlockchainConfig config;
 	std::string dataDir;
-	HashMap<uint32_t, sp<MmapHandle>> openEpochs;
+	CustomizableFileCache<EpochFile> epochCache;
 	MmapHandle metadataFile;
 	blockchain_metadata_header_t* header;
 
@@ -138,6 +134,8 @@ private:
 
 	ThreadPool executor;
 	sp<Catalog> catalog;
+
+	sp<BlockTimestampTracker> timestampTracker;
 
 	LogEndpoint log;
 
