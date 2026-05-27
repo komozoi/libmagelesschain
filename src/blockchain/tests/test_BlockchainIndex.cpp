@@ -26,7 +26,7 @@
  *
  * BlockchainIndex is a query handle: at query time it asks its attached
  * Catalog which segments cover the block range of interest and mmaps
- * just those payloads through its attached IndexContainerManager.
+ * just those payloads through its attached Catalog.
  *
  * These tests pin the bare-bones contract: encodingVersion() is stable,
  * attach() stores its arguments, and mergeSegments() with no inputs

@@ -48,21 +48,16 @@ deeper detail on any piece, follow the link.
   an ordered block. See [mev-builder.md](mev-builder.md).
 
 - **`BlockchainBackend`** (concrete, library owned). Owns the durable
-  epoch journal, the typed registries, the catalog, and the index
-  container manager. Exposes `index<T>(id)`, `newStateOverride()`,
-  `getBlock`, `getTransactionsByTimeWindow`. See
+  epoch journal, the typed registries, and the catalog. Exposes `index<T>(id)`,
+  `newStateOverride()`, `getBlock`, `getTransactionsByTimeWindow`. See
   [backend-and-frontend.md](backend-and-frontend.md).
 
 - **`Catalog`** (concrete, library owned). Records every segment's
   location and metadata. Range-scans by `(persistentTypeId, instanceId,
   blockRange)` return segments in ascending
-  `(blockRangeStart, mergeGeneration)` order. Replayed from a per-chain
-  append-only log on startup. See [indexes.md](indexes.md).
+  `(blockRangeStart, mergeGeneration)` order. Uses persistent B-Trees
+  for metadata and segment storage. See [indexes.md](indexes.md).
 
-- **`IndexContainerManager`** + **`IndexContainer`** (concrete, library
-  owned). Owns the per-index payload files under `dataDir/indexes/` and
-  hands out byte regions via libexcessive's `FreeSpaceFile`. Freed
-  regions (post-compaction) are reclaimed for future segment writes.
 
 - **`BlockchainFrontend`** (concrete, library owned). Owns the mempool, the
   speculative `StateOverride`, and the background block-builder thread.
@@ -96,7 +91,7 @@ sendTransaction(tx)
 |  1. write journal   |  <-- only thing that is fsync'd
 |  2. seal override   |
 |     families ->     |
-|     container write |
+|     catalog write   |
 |     + catalog insert|
 |  3. compact if over |
 |     maxSegments     |
@@ -127,25 +122,23 @@ After commit:
 - MEVBuilder that forks the override and iteratively re-scores transactions
   so state-dependent value is respected.
 - Segment-backed indexes: at commit time the backend asks each override
-  family to `seal()` a payload, writes it through `IndexContainerManager`,
-  and records a `SegmentLocator` in the `Catalog`. Indexes themselves
+  family to `seal()` a payload, writes it to the catalog,
+  and records segment metadata. Indexes themselves
   hold no committed state in RAM; they query the catalog and mmap the
   segments they need at read time.
-- Threshold-driven compaction via `BlockchainIndex::mergeSegments`. The
-  backend writes the merged output, catalogs it, then removes the input
-  segments from the catalog and frees their disk regions in the owning
-  container. There is no "obsolete" state: a segment either exists in
-  the catalog or it does not.
 - On reopen the backend only attaches each registered index to the
-  catalog and container manager. Queries read segments lazily, so no
+  catalog. Queries read segments lazily, so no
   transaction replay and no startup scan are required.
 
 ## Stopgaps still to address
 
 These are unfinished work, not contracts; the public API will not change.
 
-- Compaction runs inline on the commit thread; libexcessive's
-  `ThreadPool` will take over once concurrency hazards are scoped.
+- Threshold-driven compaction via `BlockchainIndex::mergeSegments`. The
+  backend writes the merged output, catalogs it, then removes the input
+  segments from the catalog. There is no "obsolete" state: a segment
+  either exists in the catalog or it does not.
+
 - `TimeIndex` (a library-provided `BlockchainIndex` for time-window
   queries) is not yet implemented; `getTransactionsByTimeWindow` still
   scans the journal directly.

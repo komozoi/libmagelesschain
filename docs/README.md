@@ -3,11 +3,11 @@
 These documents describe the current state of LibMagelessChain. Both the
 index-centric architectural core (typed registries, `ChainDesign`,
 `StateOverride`, the reshaped `Transaction`, Backend/Frontend/MEVBuilder)
-and the segment storage layer (`Catalog`, `IndexContainerManager`, the
+and the segment storage layer (`Catalog`, the
 `BlockchainIndex` segment lifecycle, threshold-driven compaction) are
 implemented, including the multi-file catalog with a table-of-contents
 BTree and a 256-bit bloom bitmask per catalog file, and packed
-`FreeSpaceFile`-backed containers shared across indexes. A handful of
+via `FreeSpaceFile` into catalog files. A handful of
 refinements remain (`TimeIndex`, parallel compaction via `ThreadPool`,
 crash-time index-degraded recovery); each is called out where relevant.
 
@@ -38,9 +38,9 @@ For an application author starting from scratch:
 ## Status, in one paragraph
 
 The chain now writes through real segment-backed indexes: each block's
-sealed override-family payloads are stored via `IndexContainerManager`
-and catalogued in `Catalog`. Indexes hold no committed state in RAM;
-they attach to the catalog and container manager at registration time
+sealed override-family payloads are stored and catalogued in
+the `Catalog`. Indexes hold no committed state in RAM;
+they attach to the catalog at registration time
 and mmap segments lazily at query time. Neither startup nor reads
 replay any transactions. The public API of the backend, frontend,
 MEVBuilder, ChainDesign, BackendRegistry, StateOverrideRegistry,

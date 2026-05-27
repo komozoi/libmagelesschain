@@ -36,7 +36,7 @@ struct segment_coordinate_t {
  *
  * An index it is a lightweight query handle that, at query time, asks the
  * Catalog which segments cover the block range of interest and mmaps just
- * those payloads through the IndexContainerManager.  This keeps the
+ * those payloads through the Catalog.  This keeps the
  * working set bounded regardless of chain size: most queries only need a
  * fragment of one or two segments.
  *
@@ -44,11 +44,11 @@ struct segment_coordinate_t {
  *   1. The application constructs the index and hands it to the
  *      BackendRegistry via ChainDesign::registerIndexes.
  *   2. The backend immediately calls attach(), giving the index access to
- *      the catalog, the container manager, and its own
- *      (persistentTypeId, instanceId) coordinates.  The index stores
+ *      the catalog and its own
+ *      indexId coordinate.  The index stores
  *      these and uses them for every subsequent query.
  *   3. At block commit time the backend asks the matching override family
- *      to seal() a payload, writes that payload through the container,
+ *      to seal() a payload, writes that payload through the catalog,
  *      and inserts a catalog entry.  Indexes pick up the new segment
  *      lazily on their next query via the catalog.
  *   4. When the catalog reports too many segments, the backend calls
@@ -76,7 +76,7 @@ public:
 	/*
 	 * Called once during backend construction to wire the index up to its
 	 * storage.  After this returns the index can mmap any of its own
-	 * segments via the catalog + container manager.  The default stores
+	 * segments via the catalog.  The default stores
 	 * the parameters as members; subclasses that need additional setup
 	 * (caches, etc.) may override and call this base implementation
 	 * first.

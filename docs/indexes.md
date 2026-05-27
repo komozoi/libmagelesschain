@@ -17,18 +17,16 @@ class BlockchainIndex {
 public:
     virtual ~BlockchainIndex() = default;
     virtual uint16_t encodingVersion() const = 0;
-    virtual void attach(Catalog* catalog, IndexContainerManager* containers,
-                        uint16_t persistentTypeId, uint8_t instanceId);
-    virtual Bytestring mergeSegments(const ArrayList<SegmentLocator>& inputs) const = 0;
+    virtual void attach(Catalog* catalog, uint16_t indexId);
+    virtual Bytestring mergeSegments(const ArrayList<segment_coordinate_t>& inputs) const = 0;
 };
 ```
 
 An index is a lightweight query handle. It does not hold committed
 state in RAM. At query time it asks the attached `Catalog` which
 segments cover the block range of interest and mmaps the matching
-payloads through the attached `IndexContainerManager`. Most queries
-only touch a fragment of one or two segments, so the working set stays
-bounded regardless of chain size.
+payloads. Most queries only touch a fragment of one or two segments,
+so the working set stays bounded regardless of chain size.
 
 Segment payload bytes are produced at commit time by the corresponding
 `IndexOverrideFamilyBase::seal()` (see
@@ -102,50 +100,36 @@ backend:
 
 1. Asks each registered override family to `seal()` its pending changes
    into a `Bytestring`.
-2. Writes that payload through `IndexContainerManager` to the matching
-   index's container file and records a `SegmentLocator` in the
+2. Writes that payload to a catalog file and records metadata in the
    `Catalog`.
-3. Opportunistically merges segments via `mergeSegments(inputs)` when
+3. (Planned) Opportunistically merges segments via `mergeSegments(inputs)` when
    the segment count for an index exceeds
    `BlockchainConfig::maxSegmentsPerIndex` and at least two candidates
    are under `BlockchainConfig::maxMergeableSegmentBytes`. After a
-   successful merge the input segments are removed from the catalog and
-   their disk regions are freed back to the container's `FreeSpaceFile`.
+   successful merge the input segments are removed from the catalog.
 
 ## Reading segments
 
-Indexes mmap segments lazily through the catalog and container
-manager that were wired in by `attach()`. A typical query looks like:
+Indexes mmap segments lazily through the catalog that was wired in
+by `attach()`.
 
-```cpp
-ArrayList<SegmentLocator> segs = attachedCatalog->rangeScan(
-    attachedPersistentTypeId, attachedInstanceId, fromBlock, toBlock);
-for (int i = 0; i < segs.size(); i++) {
-    const SegmentLocator& loc = segs.get(i);
-    IndexContainer::PayloadView view = attachedContainers->mmapPayload(
-        loc.containerId, loc.byteOffset, loc.byteLength);
-    // interpret view.data[0 .. view.length) according to loc.encodingVersion
-}
-```
-
-Because `rangeScan` already returns segments in ascending
-`(blockRangeStart, mergeGeneration)` order, the index can fold delta
-segments forward or short-circuit on the first absolute snapshot it
-finds, depending on its encoding. Internally the catalog walks the TOC
-BTree once, prunes catalog files whose 256-bit bloom over
-`(persistentTypeId, instanceId)` does not match and whose block range
-does not overlap `[fromBlock, toBlock]`, then range-scans the remaining
-per-file `BTree<SegmentLocator>`s via `findNext` to enumerate just the
-relevant entries.
+Because `rangeScan` (and subsequent per-file iteration) returns segments
+in ascending `(blockRangeStart, mergeGeneration)` order, the index can
+fold delta segments forward or short-circuit on the first absolute snapshot
+it finds, depending on its encoding. Internally the catalog walks the TOC
+BTree once, prunes catalog files whose 256-bit bloom over `indexId` does not
+match and whose block range does not overlap `[fromBlock, toBlock]`, then
+scans the remaining per-file `BTree<segment_btree_metadata_t>`s to enumerate
+just the relevant entries.
 
 ## `mergeSegments`
 
 When the backend triggers a merge it hands the index a list of
-`SegmentLocator`s in ascending `(blockRangeStart, mergeGeneration)`
-order. The index is responsible for mmap'ing each input via its
-attached container manager, computing the combined payload covering
-the union of all input block ranges, and returning that as a single
-`Bytestring`. Returning an empty `Bytestring` aborts the merge.
+`segment_coordinate_t`s in ascending `(blockRangeStart, mergeGeneration)`
+order. The index is responsible for mmap'ing each input, computing the
+combined payload covering the union of all input block ranges, and
+returning that as a single `Bytestring`. Returning an empty `Bytestring`
+aborts the merge.
 
 ## Storage layout on disk
 
@@ -159,50 +143,25 @@ dataDir/
         1.bin
         ...
     catalog/
-        toc.bin               BTree<CatalogFileEntry> keyed by fileId;
+        toc.bin               BTree<catalog_contents_entry_t> keyed by fileId;
                               each entry caches the file's block range,
                               live segment count, total catalogued
                               payload bytes, and a 256-bit bloom over
-                              the (persistentTypeId, instanceId) pairs
-                              present in the file
-        files/
-            <fileId>.bin      BTree<SegmentLocator> keyed by
-                              (typeId, instanceId, blockRangeStart,
-                               mergeGeneration); one per ~2 GiB of
-                              catalogued payload
-    indexes/
-        containers.bin        BTree<ContainerMetaEntry> keyed by
-                              containerId; the authoritative list of
-                              allocated containers (no directory scan)
-        <containerId>.bin     packed segment containers; each file may
-                              hold payloads from many different indexes
-                              side-by-side, capped near 2 GiB
+                              the indexIds present in the file
+        <fileId>.bin          BTree<segment_btree_metadata_t> keyed by
+                              (indexId, blockRangeStart, mergeGeneration);
+                              plus raw segment payloads packed via
+                              FreeSpaceFile.
 ```
 
-Why two file types? `catalog/files/<id>.bin` are *metadata* BTrees
-(per-segment `SegmentLocator` records), while `indexes/<id>.bin` are the
-*payload* containers (raw bytes packed via `FreeSpaceFile`). Catalog
-files are kept tiny and BTree-indexed because every read goes through
-them; payload containers are large and packed for storage efficiency.
-A query first hits the catalog, then mmaps the relevant payload
-fragment from the container.
+The catalog files are **not** `fsync`'d. The journal is the source of
+truth; if the catalog is corrupted on restart, it can be reindexed
+from the journal. This trade keeps the commit fast path I/O-bound only
+on the journal.
 
-The catalog and the index containers are **not** `fsync`'d. The journal
-is the source of truth; if the catalog or any container is corrupted on
-restart, the affected block range can be reindexed from the journal.
-This trade keeps the commit fast path I/O-bound only on the journal.
-
-Segment removal uses a tombstone bit on the `SegmentLocator` BTree
-entry rather than a true BTree delete (libexcessive's `BTree::remove`
-only handles leaf nodes today). Range scans skip tombstones; the disk
-region is released through the container's `FreeSpaceFile` on the same
-call.
-
-`IndexContainer` is backed by libexcessive's `FreeSpaceFile`, which
-lets compacted-away segment regions be reclaimed without rewriting the
-whole file. When compaction removes a segment from the catalog the
-backend calls `freeRegion(offset, length)` on the owning container so
-future segment writes can reuse the space.
+Segment removal uses a tombstone bit on the `segment_btree_metadata_t` BTree
+entry rather than a true BTree delete. Range scans skip tombstones; the disk
+region is released through the file's `FreeSpaceFile`.
 
 ## Remaining work
 
@@ -213,6 +172,6 @@ future segment writes can reuse the space.
 - **Crash recovery / index-degraded blocks**: detect-and-reindex on
   startup for individual block ranges whose container payloads fail
   checksum.
-- **Parallel compaction**: today merges run inline on the commit thread.
-  Future work moves them onto libexcessive's `ThreadPool` so the
-  commit thread never blocks on a merge.
+- **Compaction / Merging**: segment merging via `mergeSegments` is not
+  yet implemented.  Future work will move this onto libexcessive's
+  `ThreadPool` so the commit thread never blocks on a merge.

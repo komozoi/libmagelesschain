@@ -19,7 +19,7 @@ struct BlockchainConfig {
 
 The frontend uses these to drive the block-builder loop's cadence and the
 `maxTransactions` argument it passes to `MEVBuilder::buildBlock`. The
-backend uses them to enforce minimum block spacing in `addBlock`.
+backend uses them to calculate dynamic block spacing in `addBlock`.
 
 ## BlockchainBackend
 
@@ -37,13 +37,11 @@ During construction the backend:
 2. Calls `design->registerIndexes(BackendRegistry&)`.
 3. Calls `design->registerOverrides(StateOverrideRegistry&)`.
 4. Calls `design->registerTransactionTypes(TransactionTypeRegistry&)`.
-5. Opens the `Catalog` at `dataDir/catalog/` and the
-   `IndexContainerManager` at `dataDir/indexes/`.
-6. Calls `BlockchainIndex::attach(catalog, containerManager,
-   persistentTypeId, instanceId)` on every registered index instance so
-   it can range-scan the catalog and mmap its own segments at query
-   time. No segment payloads are read at startup and no transactions are
-   replayed.
+5. Opens the `Catalog` at `dataDir/catalog/`.
+6. Calls `BlockchainIndex::attach(catalog, indexId)` on every registered
+   index instance so it can range-scan the catalog and mmap its own
+   segments at query time. No segment payloads are read at startup and
+   no transactions are replayed.
 
 The backend is non-copyable and non-movable. The `sp<ChainDesign>` is held
 for the backend's lifetime.
@@ -72,10 +70,9 @@ const StateOverrideRegistry&   getStateOverrideRegistry()   const;
 
 Writes the block (header + transactions) to the durable journal, updates
 the metadata header, asks each registered override family to seal its
-pending changes into a segment payload, writes those payloads through
-`IndexContainerManager`, and inserts a `SegmentLocator` for each one
-into the `Catalog`. Returns the new block height, or `-1` if called
-before the `targetBlockTimeMs` minimum has elapsed since the last
+pending changes into a segment payload, and writes those payloads to the
+`Catalog`. Returns the new block height, or `-1` if called
+before the dynamic block time has elapsed since the last
 commit. Block numbers are 0-based; block *height* is the count of
 committed blocks. The first block is block `0` and after committing it
 the height is `1`.
@@ -92,8 +89,8 @@ Returns a fresh empty `sp<StateOverride>` populated with one override
 family per registered slot (via `StateOverrideRegistry`). The caller may
 freely mutate it without affecting the backend's internal state. Reads
 through the override fall through to the committed indexes via the
-catalog + container manager, so callers always see a consistent
-"committed state plus pending edits" view.
+catalog, so callers always see a consistent "committed state plus
+pending edits" view.
 
 #### `index<T>(id)`
 
@@ -106,35 +103,30 @@ instance of type `T` with that `id` was registered by `ChainDesign`.
   (block height, last block time, etc).
 - `openEpochs`: `HashMap<uint32_t, sp<MmapHandle>>` caching open epoch
   files indexed by epoch id.
-- `catalog`: `sp<Catalog>` recording every segment's metadata under
-  `dataDir/catalog/`.
-- `containerManager`: `sp<IndexContainerManager>` owning the packed
-  segment containers under `dataDir/indexes/`. Each container is a
-  `FreeSpaceFile` capped near 2 GiB that may hold payloads from many
-  different indexes side-by-side.
+- `catalog`: `sp<Catalog>` recording every segment's metadata and
+  payloads under `dataDir/catalog/`.
 
-The backend never spawns threads. Threshold-driven compaction runs
-inline inside `addBlock` and the merge order is deterministic (smallest
-two segments under the configured size threshold).
+The backend uses a `ThreadPool` for background catalog writes and
+segment merges. Compaction merges are deterministic (smallest two
+segments under the configured size threshold).
 Application-level persistent threading lives in the frontend.
 
 ### On-disk layout
 
 ```
 dataDir/
-    metadata.bin
+    metadata.bin                       Frontend state metadata, contains mempool details
+    timestamps.bin                     Maps timestamps to blocks, allows efficient range lookups
     epochs/    *.bin                       journal, fsync'd, source of truth
-    catalog/   toc.bin                     BTree<CatalogFileEntry> keyed by fileId
-               files/<id>.bin              BTree<SegmentLocator> per file
-    indexes/   containers.bin              BTree<ContainerMetaEntry> keyed by containerId
-               <containerId>.bin           packed FreeSpaceFile container
+    catalog/   toc.bin                     BTree<catalog_contents_entry_t> keyed by fileId
+               <id>.bin                    BTree<segment_btree_metadata_t> plus payloads
 ```
 
 Every persistent sorted mapping the library owns is a libexcessive
-`BTree`: the TOC, each catalog file's segment list, and the container
-metadata list. No directory scans, no in-RAM segment lists. Only the
-journal is `fsync`'d; anything under `catalog/` or `indexes/` can be
-rebuilt from the journal if it is corrupted on restart.
+`BTree`: the TOC and each catalog file's segment list. No directory
+scans, no in-RAM segment lists. Only the journal is `fsync`'d;
+anything under `catalog/` can be rebuilt from the journal if it is
+corrupted on restart.
 
 ## BlockchainFrontend
 
@@ -217,8 +209,7 @@ in the destructor:
 
 The block-builder thread is **not** scheduled through `libexcessive`'s
 `ThreadPool`: persistent threads use raw `std::thread`. The `ThreadPool`
-is reserved for the segment merges and catalog writes that arrive in
-**(Phase 2+)**.
+is used for the segment merges and catalog writes.
 
 ### Mempool persistence
 

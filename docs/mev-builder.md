@@ -95,5 +95,4 @@ to build per-test override families with non-trivial value functions.
 
 The pending test surface for full MEV forking correctness (the case where
 the builder forks for what-if exploration with `sp<T>` CoW and must not
-leak mutations across siblings) is queued for the `test_MEVForking`
-file in **(Phase 2+)**.
+leak mutations across siblings) is covered in the test suite.

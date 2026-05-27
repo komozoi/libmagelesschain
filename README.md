@@ -54,65 +54,79 @@ And create a file `main.cpp`:
 #include <blockchain/BlockchainFrontend.h>
 #include <blockchain/BlockchainBackend.h>
 #include <blockchain/Transaction.h>
-#include <blockchain/BlockchainStateSnapshot.h>
+#include <blockchain/ChainDesign.h>
+#include <blockchain/IndexOverride.h>
 #include <Logger.h>
-#include <iostream>
 
-// 1. Define your State
-class MyState : public BlockchainStateSnapshot {
+// 1. Define your State (as an Override Family)
+class MyOverride : public IndexOverrideFamilyBase {
 public:
-    int counter = 0;
-    MyState(BlockchainBackend& backend, long blockHeight) 
-        : BlockchainStateSnapshot(backend, blockHeight) {}
+	int counter = 0;
 };
 
 // 2. Define your Transaction
 class IncrementTx : public Transaction {
 public:
-    uint8_t getTypeId() const override { return 1; }
-    uint64_t getTimestamp() const override { return 123456789; } 
-    
-    bool verify(BlockchainStateSnapshot& snapshot) const override { return true; }
-    
-    bool apply(BlockchainStateSnapshot& snapshot) const override {
-        static_cast<MyState&>(snapshot).counter++;
-        return true;
-    }
-    
-    float computeValue(BlockchainStateSnapshot& snapshot) const override { return 1.0f; }
-    
-    void write(MmapHandle* dst) const override { 
-        dst->write(getTypeId());
-    }
-    
-    size_t size() const override { return sizeof(uint8_t); }
-    
-    static sp<Transaction> createFromMmap(MmapHandle* src) { 
-        return sp<IncrementTx>::create(); 
-    }
+	bool verify(const StateOverride& state) const override { return true; }
+	
+	bool apply(StateOverride& state) const override {
+		// Access the custom state family by id (registration order)
+		state.override<MyOverride>(0).counter++;
+		return true;
+	}
+	
+	float computeValue(const StateOverride& state) const override { return 1.0f; }
+	
+	void write(MmapHandle* dst) const override { 
+		dst->write(getTypeId());
+	}
+	
+	size_t size() const override { return sizeof(uint8_t); }
+	uint8_t getTypeId() const override { return 1; }
+	uint64_t getTimestamp() const override { return 0; }
+	
+	static sp<Transaction> createFromMmap(MmapHandle* src) { 
+		return sp<IncrementTx>::create(); 
+	}
+};
+
+// 3. Define your Chain Design
+class MyChainDesign : public ChainDesign {
+public:
+	void registerIndexes(BackendRegistry& registry) override {
+		// Basic example: no persistent indexes yet
+	}
+	void registerOverrides(StateOverrideRegistry& registry) override {
+		registry.registerOverride<MyOverride>();
+	}
+	void registerTransactionTypes(TransactionTypeRegistry& registry) override {
+		registry.registerType(1, &IncrementTx::createFromMmap);
+	}
 };
 
 int main() {
-    // libexcessive logger (log directory, file level, console level)
-    Logger logger("logs", 0, 0);
-    
-    // Register transaction types
-    Transaction::registerType(1, IncrementTx::createFromMmap);
+	// Initialize logger
+	Logger logger("logs", 0, 0);
+	
+	// Create the chain design
+	sp<MyChainDesign> design = sp<MyChainDesign>::create();
 
-    // Initialize backend and frontend
-    BlockchainBackend backend(logger, "data");
-    BlockchainFrontend frontend(backend, sp<MyState>::create(backend, 0));
+	// Initialize backend and frontend
+	BlockchainBackend backend(logger, "data", design);
+	BlockchainFrontend frontend(backend);
 
-    // Send a transaction to the mempool
-    frontend.sendTransaction(sp<IncrementTx>::create());
-    
-    // The state in the frontend includes the effects of transactions in the mempool
-    std::cout << "Current counter: " 
-              << static_cast<const MyState&>(*frontend.getState()).counter << std::endl;
+	// Send a transaction to the mempool
+	frontend.sendTransaction(sp<IncrementTx>::create());
+	
+	// The state in the frontend includes the effects of transactions in the mempool
+	LogEndpoint log(logger, "Main");
+	log.info("Current counter: %d", frontend.getState()->override<MyOverride>(0).counter);
 
-    return 0;
+	return 0;
 }
 ```
+
+For more detailed examples, including persistent indexing and MEV strategies, see [docs/examples.md](docs/examples.md).
 
 ## Key Features
 
@@ -122,9 +136,9 @@ int main() {
 * **Index-centric storage.** Committed state lives in application-defined indexes, not in an in-RAM snapshot.
   Indexes can be anything: key/value tables, multidimensional arrays, vector search, graph stores, etc. The library
   never assumes a particular state structure and never holds the chain state in memory.
-* **Library-orchestrated segments and containers.** Indexes define what goes into each segment; the library decides
-  *where* segments live, wraps them with checksums, packs them into sub-2 GiB shared container files via
-  `FreeSpaceFile`, and tracks them through a catalog.
+* **Library-orchestrated segments.** Indexes define what goes into
+  each segment; the library decides *where* segments live, wraps them
+  with checksums, and tracks them through a catalog.
 * **Catalog with table-of-contents.** Each catalog file holds a BTree of segments keyed by block range; a separate
   table-of-contents BTree maps block-range queries to catalog files. A 256-bit bloom-style bitmask per catalog file
   filters by index type and instance ID so range scans only touch relevant catalogs.
@@ -140,9 +154,10 @@ int main() {
 * **MEV-aware block builder.** `MEVBuilder` iteratively explores candidate orderings, scoring transactions through
   `computeValue` against a forked override so that state-dependent value is evaluated correctly. "Value" is whatever
   the application optimizes for: fee revenue, data completeness, transaction success rate, ordering fairness, etc.
-* **Built-in `TimeIndex`.** The library ships a tree-segment-based index that handles time-window queries
-  (mempool tail merged in by the frontend). Applications get this without writing their own.
-* **Segment compaction.** Smallest segments are merged in the background via `libexcessive`'s `ThreadPool` once the
+* **Built-in `TimeIndex` (Planned).** A tree-segment-based index that handles time-window queries
+  (mempool tail merged in by the frontend). Currently time-window queries scan the journal via a block-timestamp
+  tracker; the migration to a segmented index will happen in a future phase.
+* **Segment compaction (Planned).** Smallest segments are merged in the background via `libexcessive`'s `ThreadPool` once the
   configured segment-count threshold is crossed and at least two candidates are below 500 MiB. Indexes implement
   `mergeSegments`; the library schedules and orchestrates.
 * **Crash-tolerant by construction.** Only the epoch journal is `fsync`'d; it is the source of truth. Indexes,
@@ -163,11 +178,10 @@ LibMagelessChain keeps a strict split between the **Frontend** (mempool, specula
   library considers irrecoverable on loss.
 - Owns the **index registry**: one `IndexFamily<T>` per registered index type, each holding a dense `ArrayList<sp<T>>`
   of instances by registration order.
-- Owns the **container manager**: packed, `FreeSpaceFile`-backed container files (capped well below 2 GiB) that hold
-  segment payloads for one or more index instances.
-- Owns the **catalog**: per-catalog-file BTrees over `(blockRangeStart, blockRangeEnd) → {indexTypeKey, instanceId,
-  containerId, byteOffset, byteLength, encodingVersion, checksum, mergeGeneration}`, plus a top-level table-of-
-  contents BTree and a 256-bit bloom bitmask per catalog file.
+- Owns the **catalog**: per-catalog-file BTrees over `(blockRangeStart, blockRangeEnd) → {indexId,
+  byteOffset, byteLength, encodingVersion, checksum, mergeGeneration}`,
+  plus a top-level table-of-contents BTree and a 256-bit bloom bitmask
+  per catalog file.
 - Owns the **ThreadPool** used for segment merges and catalog writes. Block building is *not* on the pool; it lives
   on a dedicated frontend thread.
 - Provides `backend.index<T>(id)` for typed query access and `backend.newStateOverride()` for fresh overrides.
@@ -182,18 +196,16 @@ LibMagelessChain keeps a strict split between the **Frontend** (mempool, specula
 - Runs a **persistent block-builder thread** that periodically asks `MEVBuilder` for an ordered block and submits it
   to the backend.
 - Replays the **mempool only** at startup (bounded work).
-- Never opens index, segment, container, or catalog files. Its only filesystem responsibility is the mempool file.
+- Never opens index, segment, or catalog files. Its only filesystem responsibility is the mempool file.
 
 ### Indexes and Segments
 
-- Each application index inherits from `BlockchainIndex` and implements `writeSegment`, `readSegment`,
-  `mergeSegments`, and `encodingVersion`.
+- Each application index inherits from `BlockchainIndex` and implements `mergeSegments` and `encodingVersion`.
 - Segment payload *contents* are application-owned and may use any encoding the index chooses.
 - Segment *framing* (location, checksum, length, catalog entry) is library-owned.
 - One segment per `(index instance, block)` pair is produced at commit when the corresponding override family is
   non-empty. Segments are never fragmented.
-- Each index instance's segments live in its own logical lineage but may share physical container files with other
-  indexes.
+- Each index instance's segments live in its own logical lineage but may share physical catalog files with other indexes.
 - Encoding versions are per-segment, not per-index. An index that cannot decode an older segment causes that segment
   to be discarded and the affected block range to be rebuilt from the journal.
 
@@ -214,10 +226,10 @@ LibMagelessChain keeps a strict split between the **Frontend** (mempool, specula
 2. Frontend hands the ordered transactions to the backend.
 3. Backend writes the block to the journal and `fsync`s.
 4. Backend builds a fresh override and applies the block's transactions in order.
-5. Backend seals each registered index's override family into a segment payload, writes it into a container, and
+5. Backend seals each registered index's override family into a segment payload, writes it to the catalog, and
    inserts a catalog entry.
 6. On any indexing failure, the block is marked **index-degraded** and an immediate reindex is attempted; if that
-   fails, partial segments are released through `FreeSpaceFile` and the block remains readable from the journal.
+   fails, the block remains readable from the journal.
 
 ## Dependencies
 

@@ -78,7 +78,7 @@ backend will route transactions through it.
 - `ChainDesign` callbacks run only during `BlockchainBackend` construction,
   on the thread that built the backend.
 - After construction the design pointer is held but no further methods are
-  called by the library in Phase 1. It is safe for the application to keep
+  called by the library. It is safe for the application to keep
   using the same `sp<ChainDesign>` for inspection or as a factory for the
   application's own purposes.
 

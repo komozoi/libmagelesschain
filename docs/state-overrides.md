@@ -78,7 +78,7 @@ public:
     void debit(uint64_t account, int64_t amount) { /* ... */ }
     void credit(uint64_t account, int64_t amount) { /* ... */ }
 
-    Bytestring seal() const override { /* (Phase 2+) serialize 'changes' */ }
+    Bytestring seal() const override { /* serialize 'changes' */ }
 
 private:
     HashMap<uint64_t, int64_t> changes;
@@ -99,13 +99,10 @@ than one.
 
 ### `seal()`
 
-In Phase 1 `seal()` is allowed to return an empty `Bytestring` and the
-library does not yet write its output to disk. When the segment-storage
-layer lands **(Phase 2+)**, `seal()` will be called once per
-`(type, id)` slot at block commit time, and the returned bytes will become
-the segment payload for that index instance. Returning an empty
-`Bytestring` will signal "no changes for this index in this block" and
-will skip the catalog entry.
+`seal()` is called once per `(type, id)` slot at block commit time, and the
+returned bytes become the segment payload for that index instance. Returning
+an empty `Bytestring` signals "no changes for this index in this block"
+and skips the catalog entry.
 
 ## How the frontend uses StateOverride
 

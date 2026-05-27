@@ -141,7 +141,7 @@ themselves prior to `sendTransaction`.
 The backend offers `getBlock(blockNumber)` and
 `getTransactionsByTimeWindow(start, end)` without the mempool tail.
 
-## What changed from pre-Phase-1
+## Architecture Notes
 
 - `apply` now takes a `StateOverride&` instead of a `BlockchainStateSnapshot&`.
 - `verify` likewise takes a `const StateOverride&`.
