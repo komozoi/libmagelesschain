@@ -145,7 +145,8 @@ private:
 
 	std::string catalogDir;
 
-	std::shared_mutex tocMutex;
+	// Although BTree is threadsafe, in some cases we need to do an atomic read-modify-write
+	std::shared_mutex tocWriteMutex;
 	BTree<catalog_contents_entry_t, 31>* tocBTree;
 
 	// This is used to ensure time-based filenames are not duplicated.

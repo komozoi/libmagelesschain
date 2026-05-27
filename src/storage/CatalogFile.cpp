@@ -97,7 +97,8 @@ void CatalogFile::createEntry(uint16_t indexId, uint16_t version, uint16_t merge
 		// For this part of the method, it is safe to share the mutex because we're not altering existing on-disk data
 		// that would be read.  We're only writing data to a region of the file, which is not referenced elsewhere yet.
 		std::shared_lock _(rwMutex);
-		pwrite(fd.getFd(), &content[0], length, offset);
+		if (pwrite(fd.getFd(), &content[0], length, offset) != (ssize_t)length)
+			throw std::runtime_error("CatalogFile::createEntry: pwrite failed");
 	}
 
 	// Prepare to add the entry to the segment index

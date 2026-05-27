@@ -108,7 +108,7 @@ void Catalog::writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGen
 		try {
 			file.mut().createEntry(indexId, version, mergeGeneration, startBlock, endBlock, content);
 
-			std::unique_lock _(tocMutex);
+			std::unique_lock _(tocWriteMutex);
 			tocBTree->find(key); // Refresh key with latest data from TOC
 			key.totalBytes = file->getTotalBytes();
 			key.blockRangeMin = std::min(key.blockRangeMin, startBlock);
@@ -128,7 +128,6 @@ void Catalog::writeSegment(uint16_t indexId, uint16_t version, uint16_t mergeGen
 }
 
 ArrayList<uint64_t> Catalog::rangeScan(uint16_t indexId, uint64_t startBlock, uint64_t endBlock) {
-	std::shared_lock _(tocMutex);
 	ArrayList<uint64_t> out;
 
 	uint256_t indexBloom = bloomKeyHash(indexId);
@@ -146,59 +145,52 @@ ArrayList<uint64_t> Catalog::rangeScan(uint16_t indexId, uint64_t startBlock, ui
 }
 
 sp<CatalogFile> Catalog::selectFileFor(uint16_t indexId, uint64_t startBlock, uint64_t endBlock, uint32_t size, catalog_contents_entry_t& key) {
-	{
-		std::shared_lock _(tocMutex);
+	// Collect up to 16 candidates to write to
+	StaticPriorityQueue<uint64_t, 16> candidates;
 
-		// Collect up to 16 candidates to write to
-		StaticPriorityQueue<uint64_t, 16> candidates;
+	// Search starting with the newest catalog files to oldest
+	// Stop when we have enough candidates or we've reached the end of the catalog
+	key = {millis_since_epoch(), 0, 0, 0, 0, 0, {}};
+	while (tocBTree->findNext(key) && candidates.length() < 16) {
+		if (key.totalBytes + size <= CATALOG_FILE_MAX_BYTES) {
+			// This score prioritizes files that are more isolated to a few indexes, meaning queries are more
+			// efficient.  This is due to likelyhood of each segment belonging to the correct index
+			int score = 256 - key.bloom.countBits();
+			if (bloomMaybeContains(key.bloom, indexId))
+				score += 100;
 
-		// Search starting with the newest catalog files to oldest
-		// Stop when we have enough candidates or we've reached the end of the catalog
-		key = {millis_since_epoch(), 0, 0, 0, 0, 0, {}};
-		while (tocBTree->findNext(key) && candidates.length() < 16) {
-			if (key.totalBytes + size <= CATALOG_FILE_MAX_BYTES) {
-				// This score prioritizes files that are more isolated to a few indexes, meaning queries are more
-				// efficient.  This is due to likelyhood of each segment belonging to the correct index
-				int score = 256 - key.bloom.countBits();
-				if (bloomMaybeContains(key.bloom, indexId))
-					score += 100;
+			// Try to find a file that is close to the desired block range
+			score -= (int)sqrt((double)blockRangeDistance(key, startBlock, endBlock)) / 10;
 
-				// Try to find a file that is close to the desired block range
-				score -= (int)sqrt((double)blockRangeDistance(key, startBlock, endBlock)) / 10;
+			// Look for files that have less segments, so queries are likely more efficient
+			score -= key.segmentCount;
 
-				// Look for files that have less segments, so queries are likely more efficient
-				score -= key.segmentCount;
-
-				candidates.add(key.fileId, score);
-			}
-
-			key.fileId--;
+			candidates.add(key.fileId, score);
 		}
 
-		candidates.sort();
-		std::shared_lock _2(beingWrittenMutex);
-		for (int i = 0; i < candidates.length(); ++i) {
-			sp<CatalogFile> file = catalogCache.open(idToFilename(candidates.at(i)));
+		key.fileId--;
+	}
 
-			key.fileId = candidates.at(i);
-			if (!tocBTree->find(key))
-				throw std::runtime_error("Catalog file not found in BTree, despite supposedly being indexed (SEVERE BUG, REPORT THIS!)");
+	candidates.sort();
+	std::shared_lock _2(beingWrittenMutex);
+	for (int i = 0; i < candidates.length(); ++i) {
+		sp<CatalogFile> file = catalogCache.open(idToFilename(candidates.at(i)));
 
-			if (file && !filesBeingWritten.contains(file.get()))
-				return file;
-		}
+		key.fileId = candidates.at(i);
+		if (!tocBTree->find(key))
+			throw std::runtime_error("Catalog file not found in BTree, despite supposedly being indexed (SEVERE BUG, REPORT THIS!)");
+
+		if (file && !filesBeingWritten.contains(file.get()))
+			return file;
 	}
 
 	// If we got here, then we haven't found a suitable file.  We'll need to create one.
 
 	uint64_t newId = millis_since_epoch();
-	{
-		std::unique_lock _(tocMutex);
-		if (newId <= lastFileId)
-			newId++;
-		lastFileId = newId;
-		key = {newId, UINT64_MAX, 0, 0, 0, 0, {}};
-	}
+	if (newId <= lastFileId)
+		newId++;
+	lastFileId = newId;
+	key = {newId, UINT64_MAX, 0, 0, 0, 0, {}};
 
 	return catalogCache.open(idToFilename(newId), O_RDWR | O_CREAT);
 }

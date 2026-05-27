@@ -101,7 +101,7 @@ private:
 				}
 
 				// Find the oldest handle, filtering by ones that aren't in use
-				if (openPath.lastAccess < oldestTime && openPath.accessor.numReferences() > 1) {
+				if (openPath.lastAccess < oldestTime && openPath.accessor.numReferences() <= 1) {
 					oldestTime = openPath.lastAccess;
 					oldest = i;
 				}

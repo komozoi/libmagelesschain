@@ -251,7 +251,7 @@ TEST_F(CatalogTest, PayloadRoundTripsThroughReader) {
 				reader.forEachSegment(7, 0, UINT64_MAX,
 					[&](const segment_btree_metadata_t& s) {
 						MmapHandle view = reader.openEntry(s.byteOffset, s.byteLength);
-						const uint8_t* data = view.directPointer<uint8_t>();
+						const uint8_t* data = view.directPointer<uint8_t>(s.byteOffset % 4096);
 						if (data && s.byteLength == 16) {
 							memcpy(observed, data, 16);
 							found = true;
