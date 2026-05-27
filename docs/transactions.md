@@ -42,13 +42,15 @@ block. Execution order matters.
 
 ### `verify`
 
-Should not mutate the override. Currently informational only; the commit
-path does not call `verify` in Phase 1. Applications may still use it for
-mempool admission filtering before calling `sendTransaction`.
+Should not mutate the override. The commit path calls `verify` during the
+transient state verification phase in `addBlock`. Transactions that fail
+`verify` will cause `addBlock` to reject the entire block. Applications
+should still use `verify` for mempool admission filtering before calling
+`sendTransaction`.
 
-Later this will be used to reject invalid transactions.  This method
-checks that the transaction is valid, but not necessarily that the
-transaction will succeed when one attempts to commit it.
+This method checks that the transaction is valid against the current state,
+but not necessarily that the transaction will succeed when one attempts to
+commit it (which is determined by `apply`).
 
 ### `computeValue`
 

@@ -222,3 +222,19 @@ TEST_F(BlockchainBackendTest, MultipleBlocksInOneEpoch) {
 		EXPECT_EQ(((const TestTransaction&)*retrievedTxs.get(0)).value, i + 1);
 	}
 }
+
+TEST_F(BlockchainBackendTest, RejectInvalidTransaction) {
+    class InvalidTestTransaction : public TestTransaction {
+    public:
+        InvalidTestTransaction(int val = 1, int id = 0) : TestTransaction(val, id) {}
+        bool verify(const StateOverride&) const override { return false; }
+    };
+    
+    BlockchainBackend backend(logger, testDir, makeDesign());
+
+    ArrayList<sp<Transaction>> txs;
+    txs.add(sp<InvalidTestTransaction>::create(100));
+
+    EXPECT_THROW(backend.addBlock(txs), std::runtime_error); 
+    EXPECT_EQ(backend.getBlockHeight(), 0);
+}

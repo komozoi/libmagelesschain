@@ -144,7 +144,13 @@ long BlockchainBackend::addBlock(const ArrayList<sp<Transaction>>& transactions)
 	}
 
 	// First, verify the transactions with a transient state
-	// TODO: Implement that
+	sp<StateOverride> verificationOverride = newStateOverride();
+	for (const sp<Transaction>& tx : transactions) {
+		if (!tx->verify(*verificationOverride)) {
+			throw std::runtime_error("Transaction verification failed");
+		}
+		tx->apply(verificationOverride.mut());
+	}
 
 	// Get general epoch file setup/info
 	uint64_t blockNumber = header->currentBlockHeight++;
