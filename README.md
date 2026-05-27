@@ -58,7 +58,7 @@ And create a file `main.cpp`:
 #include <blockchain/IndexOverride.h>
 #include <Logger.h>
 
-// 1. Define your State (as an Override Family)
+// 1. Define your State Perspective (as an Override Family)
 class MyOverride : public IndexOverrideFamilyBase {
 public:
 	int counter = 0;
@@ -145,12 +145,13 @@ For more detailed examples, including persistent indexing and MEV strategies, se
 * **Typed registries with no casts in application code.** Indexes are accessed by `backend.index<T>(id)`; override
   families are accessed by `s.override<T>(id)`. Both use type-key machinery internally so the application never
   needs `static_cast`, `dynamic_cast`, or string lookups to reach its own data.
-* **State overrides instead of cumulative state.** A `StateOverride` is a typed bundle of pending modifications
+* **State overrides for pending changes.** A `StateOverride` is a typed bundle of pending modifications
   layered on top of the committed indexes. The frontend keeps one to reflect the mempool; MEV candidates fork it
   cheaply via `sp<T>` copy-on-write; at commit, the backend builds a fresh override and seals each family into one
   segment per index instance.
-* **No transaction replay on startup.** State is reconstructable from indexes, not from re-running history. Only the
-  mempool, which is bounded by mempool size rather than chain size, is replayed at frontend startup.
+* **Instant state recovery from indexes.** State is reconstructable from indexes, avoiding the need to re-run
+  history on every startup. Only the mempool, which is bounded by mempool size rather than chain size, is replayed
+  at frontend startup. If indexes are missing or corrupted, they can be rebuilt from the journal.
 * **MEV-aware block builder.** `MEVBuilder` iteratively explores candidate orderings, scoring transactions through
   `computeValue` against a forked override so that state-dependent value is evaluated correctly. "Value" is whatever
   the application optimizes for: fee revenue, data completeness, transaction success rate, ordering fairness, etc.

@@ -1,9 +1,8 @@
-# State overrides
+# State perspective and overrides
 
-A `StateOverride` is the typed bundle of pending state modifications for
-one block-in-progress. It replaces the legacy `BlockchainStateSnapshot`
-type entirely: there is no longer any cumulative in-RAM chain state in the
-library.
+A `StateOverride` is a typed bundle of pending state modifications for
+one block-in-progress. It provides a modified perspective of the
+underlying state, layered on top of the committed indexes.
 
 A state override is *not* a snapshot of the whole chain. It carries only
 the deltas that pending transactions have produced on top of the committed
@@ -15,12 +14,7 @@ indexes.
 The library type `StateOverride` is a concrete container that holds one
 `sp<IndexOverrideFamilyBase>` per registered `(TypeKey, uint8_t id)` slot.
 Each slot's concrete type is whatever the application registered via
-`ChainDesign::registerOverrides`. Internally:
-
-```cpp
-HashMap<TypeKey, ArrayList<sp<IndexOverrideFamilyBase>>> families;
-ArrayList<Slot> order;   // preserves registration order for sealing
-```
+`ChainDesign::registerOverrides`. 
 
 Two operations are exposed to application code:
 
