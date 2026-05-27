@@ -1,6 +1,6 @@
 /*
  * Copyright 2021-2026 komozoi
- * Original Creation Date: 2026-5-26
+ * Original Creation Date: 2026-5-27
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,13 +20,13 @@
 #define LIBMAGELESSCHAIN_EPOCHFILE_H
 
 
-#include <string>
 #include "fs/FdHandle.h"
-
-#include "Transaction.h"
-#include "TransactionTypeRegistry.h"
 #include "alloc/pointer.h"
 #include "ds/ArrayList.h"
+
+#include "blockchain/Transaction.h"
+#include "blockchain/TransactionTypeRegistry.h"
+
 
 #define BLOCKS_PER_EPOCH 65536
 #define BLOCK_ALIGNMENT 4096

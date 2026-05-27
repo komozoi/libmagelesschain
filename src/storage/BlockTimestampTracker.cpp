@@ -25,7 +25,7 @@
 BlockTimestampTracker::BlockTimestampTracker(const std::string& dataDir) {
 	std::string path = dataDir + "/timestamps.bin";
 	FdHandle fd = FdHandle::open(path.c_str(), O_RDWR | O_CREAT, 0660);
-	index = new BTree<block_timestamp_entry_t>(std::move(fd), 0, block_timestamp_entry_t::compare);
+	index = new BTree(std::move(fd), 0, block_timestamp_entry_t::compare);
 }
 
 void BlockTimestampTracker::addBlock(uint64_t timestamp, uint64_t blockNumber) {

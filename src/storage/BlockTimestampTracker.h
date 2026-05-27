@@ -25,7 +25,6 @@
 
 #include "ds/ArrayList.h"
 #include "fs/BTree.h"
-#include "fs/FdHandle.h"
 
 /**
  * Entry for the block timestamp BTree index.

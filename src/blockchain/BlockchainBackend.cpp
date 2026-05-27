@@ -18,12 +18,14 @@
 
 #include "BlockchainBackend.h"
 
-#include "EpochFile.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <stdexcept>
 
 #include "universaltime.h"
+
+#include "storage/EpochFile.h"
+
 
 #define LONG_TIME_MILLIS (1000 * 3600)
 #define WANTED_TX_PER_BLOCK 180

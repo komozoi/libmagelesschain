@@ -1,6 +1,6 @@
 /*
  * Copyright 2021-2026 komozoi
- * Original Creation Date: 2026-5-26
+ * Original Creation Date: 2026-5-27
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,13 @@
 
 #include "EpochFile.h"
 
+
 struct block_header_t {
 	uint64_t millis;
 	uint16_t numTransactions;
 	uint8_t reserved[54];
 };
+
 
 EpochFile::EpochFile(const FdHandle& file)
 	: mmapHandle(file.getMmapHandle(0, file.seek(1024 * 1024, SEEK_END))) {

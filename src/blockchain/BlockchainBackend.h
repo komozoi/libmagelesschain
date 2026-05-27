@@ -31,8 +31,7 @@
 #include "TransactionTypeRegistry.h"
 #include "storage/Catalog.h"
 #include "storage/CustomizableFileCache.h"
-#include "EpochFile.h"
-#include "BlockTimestampTracker.h"
+#include "storage/BlockTimestampTracker.h"
 #include "alloc/pointer.h"
 #include "ds/ArrayList.h"
 #include "ds/HashMap.h"
@@ -41,6 +40,7 @@
 
 
 struct blockchain_metadata_header_t;
+class EpochFile;
 
 /*
  * Backend storage layer.  Owns the durable epoch journal, the typed index

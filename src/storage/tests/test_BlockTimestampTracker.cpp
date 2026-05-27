@@ -18,7 +18,7 @@
 
 #include <gtest/gtest.h>
 #include <filesystem>
-#include "blockchain/BlockTimestampTracker.h"
+#include "storage/BlockTimestampTracker.h"
 
 class BlockTimestampTrackerTest : public ::testing::Test {
 protected:
